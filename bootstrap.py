@@ -1,13 +1,12 @@
 #!/usr/bin/env python2
 
 import sys
-import subprocess
 import argparse
 import time
 import logging
 
-import yaml
-import salt.client
+import salt
+import salt.runner
 
 # The minimum amount of memory in MiB that is required for installation.
 INSTALLATION_MEMORY = 1024
@@ -29,20 +28,23 @@ def parse_args():
     return parser.parse_args(sys.argv[1:])
 
 
+def _suppress_output(func, *args, **kwargs):
+    """
+    This is needed because the salt API pillar runner outputs to stdout for some
+    reason.
+    """
+    save_stdout = sys.stdout
+    sys.stdout = open('/dev/null', 'w')
+    ret = func(*args, **kwargs)
+    sys.stdout = save_stdout
+    return ret
+
+
 def get_pillar(nodename):
-    args_reclass = ['reclass-salt',
-                    '-b', '/srv/salt/base/inventory',
-                    '--pillar', nodename]
-    logger.debug("cmd: " + " ".join(args_reclass))
-    process = subprocess.Popen(args_reclass,
-                               stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE)
-    process.wait()
-    if process.returncode != 0:
-        logger.critical("reclass-salt failed:")
-        logger.critical(process.stderr.read())
-        sys.exit(1)
-    return yaml.load(process.stdout, Loader=yaml.Loader)
+    opts = salt.config.master_config('/etc/salt/master')
+    runner = salt.runner.RunnerClient(opts)
+    pillar = _suppress_output(runner.cmd, 'pillar.show_pillar', ['test.lab'])
+    return pillar
 
 
 def get_primary_interface(pillar):
