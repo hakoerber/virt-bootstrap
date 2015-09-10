@@ -11,6 +11,11 @@ import salt.runner
 # The minimum amount of memory in MiB that is required for installation.
 INSTALLATION_MEMORY = 1024
 
+# How long to wait for the installation to finish. If it is not finished after
+# this time, the script exists and leaves the installation running on the
+# hypervisor
+INSTALLATION_TIMEOUT = 600
+
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
@@ -166,7 +171,7 @@ def start_installation(salt_client, nodename, pillar, primary_interface):
 
     logger.debug("cmd: " + " ".join(args_virt_install))
     jid = salt_client.cmd_async(pillar['machine']['hypervisor'],
-                                'cmd.run',
+                                'cmd.run_all',
                                 [" ".join(args_virt_install)])
     return jid
 
@@ -194,10 +199,12 @@ def adjust_memory(salt_client, nodename, pillar):
 
 
 def wait_for_installation_to_finish(salt_client, jid, pillar):
-    result = salt_client.get_cli_returns(jid, pillar['machine']['hypervisor'])
+    result = salt_client.get_cli_returns(
+        jid, [pillar['machine']['hypervisor']], timeout=INSTALLATION_TIMEOUT)
+    result = result.next()[pillar['machine']['hypervisor']]['ret']
     if result['retcode'] != 0:
         logger.critical("Installation failed: " + result['stderr'])
-    logger.debug(result['stdout'].next())
+    logger.debug(result['stdout'])
 
 
 def main():
