@@ -4,9 +4,17 @@ import sys
 import argparse
 import time
 import logging
+import os.path
+import subprocess
+import shutil
+import socket
 
 import salt
+import salt.config
 import salt.runner
+import paramiko
+import paramiko.client
+
 
 # The minimum amount of memory in MiB that is required for installation.
 INSTALLATION_MEMORY = 1024
@@ -16,12 +24,26 @@ INSTALLATION_MEMORY = 1024
 # hypervisor
 INSTALLATION_TIMEOUT = 600
 
+# How long to wait for SSH to become available after the node reboots when
+# installation is finished
+SSH_TIMEOUT = 60
+
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
         super(RemoteCmdError, self).__init__()
         self.retcode = retcode
         self.stderr = stderr
+
+
+class IgnoreMissingKeyPolicy(paramiko.client.MissingHostKeyPolicy):
+    """
+    Helper class for paramiko to ignore missing host keys when connecting.
+    """
+    def __init__(self, *args, **kwargs):
+        super(IgnoreMissingKeyPolicy, self).__init__(*args, **kwargs)
+    def missing_host_key(self, *args, **kargs):
+        return
 
 
 def setup_logger(console_level):
@@ -42,6 +64,8 @@ def parse_args():
     parser.add_argument('nodename')
     parser.add_argument("--debug", action='store_true')
     parser.add_argument("--overwrite-cobbler", action='store_true')
+    parser.add_argument("--skip-install", action='store_true')
+    parser.add_argument("--skip-salt-keygen", action='store_true')
     return parser.parse_args(sys.argv[1:])
 
 
@@ -73,7 +97,7 @@ def _suppress_output(func, *args, **kwargs):
 def get_pillar(nodename):
     opts = salt.config.master_config('/etc/salt/master')
     runner = salt.runner.RunnerClient(opts)
-    pillar = _suppress_output(runner.cmd, 'pillar.show_pillar', ['test.lab'])
+    pillar = _suppress_output(runner.cmd, 'pillar.show_pillar', [nodename])
     return pillar
 
 
@@ -114,14 +138,17 @@ def get_cobbler_server(pillar, primary_interface):
 
 
 def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
-                  primary_interface):
+                  primary_interface, ssh_key):
     args_cobbler = ['cobbler', 'system', 'add',
                     '--name', nodename,
                     '--profile', pillar['machine']['profile'],
                     '--hostname', nodename,
                     '--clobber',
                     '--interface', primary_interface['identifier'],
-                    '--mac-address', primary_interface['mac']]
+                    '--mac-address', primary_interface['mac'],
+                    '--ksmeta', 'authorized_key="{}"'.format(
+                        get_authorized_key_line(ssh_key, 'cobbler').replace(
+                            ' ', r'\ '))]
     try:
         execute_with_salt(salt_client,
                           target=cobbler_server,
@@ -179,7 +206,7 @@ def start_installation(salt_client, nodename, pillar, primary_interface):
 def adjust_memory(salt_client, nodename, pillar):
     mem = pillar['machine']['memory']
     if mem < INSTALLATION_MEMORY:
-        logger.debug("Adjusing memory to {mem}MiB".format(mem=mem))
+        logger.debug("Adjusting memory to {mem}MiB".format(mem=mem))
         args_virt_adjust_mem = [
             'virsh',
             '--connect', 'qemu:///system',
@@ -201,10 +228,130 @@ def adjust_memory(salt_client, nodename, pillar):
 def wait_for_installation_to_finish(salt_client, jid, pillar):
     result = salt_client.get_cli_returns(
         jid, [pillar['machine']['hypervisor']], timeout=INSTALLATION_TIMEOUT)
-    result = result.next()[pillar['machine']['hypervisor']]['ret']
+    try:
+        result = result.next()[pillar['machine']['hypervisor']]['ret']
+    except KeyError:
+        logger.critical("Installation timed out.")
+        sys.exit(1)
     if result['retcode'] != 0:
         logger.critical("Installation failed: " + result['stderr'])
     logger.debug(result['stdout'])
+
+
+
+def generate_ssh_key():
+    key = paramiko.rsakey.RSAKey.generate(bits=4096)
+    return key
+
+
+def ssh_connect_to_new_host(nodename, ssh_key):
+    client = paramiko.client.SSHClient()
+    client.set_missing_host_key_policy(IgnoreMissingKeyPolicy())
+    try:
+        client.connect(nodename,
+                       port=22,
+                       username='root',
+                       timeout=SSH_TIMEOUT,
+                       pkey=ssh_key,
+                       allow_agent=False,
+                       look_for_keys=False)
+    except paramiko.SSHException:
+        raise
+    except socket.timeout:
+        raise
+    return client
+
+
+def read_ssh_key(directory):
+    private_key_file = os.path.join(directory, 'id_rsa')
+    ssh_key = paramiko.RSAKey.from_private_key_file(filename=private_key_file,
+                                                    password=None)
+    return ssh_key
+
+
+def save_ssh_key(ssh_key, directory):
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+    private_key_file = os.path.join(directory, 'id_rsa')
+    ssh_key.write_private_key_file(private_key_file)
+    with open(private_key_file + '.pub', 'w') as public_file:
+        public_file.write("{name} {key} {comment}".format(
+            name=ssh_key.get_name(),
+            key=ssh_key.get_base64(),
+            comment="minion provisioning"))
+
+
+def load_salt_keys(nodename, directory):
+    key_pub = os.path.join(directory, '{}.pub'.format(nodename))
+    key_pem = os.path.join(directory, '{}.pem'.format(nodename))
+    for key in key_pub, key_pem:
+        if not os.path.exists(key):
+            return None
+    return({'pub': key_pub, 'pem': key_pem})
+
+
+def master_accept_minion_keys(nodename, keys):
+    master_opts = salt.config.client_config('/etc/salt/master')
+    minion_keys = os.path.join(master_opts['pki_dir'], 'minions')
+    minion_key_path = os.path.join(minion_keys, nodename)
+
+    shutil.copyfile(keys['pub'], minion_key_path)
+
+
+def generate_salt_keys(nodename, directory):
+    master_opts = salt.config.client_config('/etc/salt/master')
+    minion_keys = os.path.join(master_opts['pki_dir'], 'minions')
+    minion_key_path = os.path.join(minion_keys, nodename)
+
+    if os.path.exists(minion_key_path):
+        logger.error("Salt already has an accepted key for that host.")
+        sys.exit(1)
+
+    args = ["salt-key",
+            "--gen-keys", nodename,
+            "--gen-keys-dir", directory]
+    process = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.wait()
+
+    key_pub = os.path.join(directory, '{}.pub'.format(nodename))
+    key_pem = os.path.join(directory, '{}.pem'.format(nodename))
+
+    return({'pub': key_pub, 'pem': key_pem})
+
+
+def copy_salt_keys_to_minion(ssh_connection, keys):
+    targetdir = "/etc/salt/pki/minion"
+    sftp = ssh_connection.open_sftp()
+
+    ssh_connection.exec_command(
+        'mkdir --mode 700 --parents {}'.format(targetdir))
+
+    for source, target in {
+            keys['pem']: '{}/minion.pem'.format(targetdir),
+            keys['pub']: '{}/minion.pub'.format(targetdir)}.items():
+
+        logger.debug("Copying \"{source}\" to \"{target}\" on remote host "
+                     "...".format(source=source, target=target))
+        ssh_connection.exec_command('rm -f {}'.format(target))
+        # we need to wait a bit between deleting and recreating, otherwise
+        # copying might be done before deletion
+        time.sleep(0.5)
+        # confirm makes the transfer fail
+        sftp.put(source, target)
+    sftp.close()
+
+
+def start_minion(ssh_connection):
+    ssh_connection.exec_command('systemctl start salt-minion')
+
+
+def get_authorized_key_line(key, comment):
+    return "{name} {key} {comment}".format(
+        name=key.get_name(),
+        key=key.get_base64(),
+        comment=comment)
 
 
 def main():
@@ -222,6 +369,17 @@ def main():
     primary_interface = get_primary_interface(pillar)
     cobbler_server = get_cobbler_server(pillar, primary_interface)
 
+    temp_keydir = '/root/{}.d'.format(nodename)
+    if not args.skip_install:
+        logger.info("Generating ephemeral SSH key ...")
+        ssh_key = generate_ssh_key()
+
+        logger.info("Saving SSH keys to \"{}\".".format(temp_keydir))
+        save_ssh_key(ssh_key, temp_keydir)
+    else:
+        logger.info("Reloading key from disk ...")
+        ssh_key = read_ssh_key(temp_keydir)
+
     salt_client = salt.client.LocalClient()
 
     try:
@@ -236,35 +394,73 @@ def main():
     logger.info("Setting up cobbler ...")
     try:
         setup_cobbler(salt_client, cobbler_server, nodename, pillar,
-                      primary_interface)
+                      primary_interface, ssh_key)
     except RemoteCmdError as e:
         logger.critical("Could not setup cobbler: " + e.stderr)
         sys.exit(1)
 
+    if not args.skip_install:
+        try:
+            libvirt_domains = libvirt_get_domains(
+                salt_client, pillar['machine']['hypervisor'])
+        except RemoteCmdError as e:
+            logger.critical("Could not get domains: " + e.stderr)
+            sys.exit(1)
+
+        if nodename in libvirt_domains:
+            logger.error("The domain already exists on the hypervisor. Use "
+                         "--reinstall to recreate the domain.")
+            sys.exit(1)
+
+        logger.info("Starting installation ...")
+        jid = start_installation(salt_client, nodename, pillar,
+                                 primary_interface)
+
+        logger.info("Adjusting memory ...")
+        try:
+            adjust_memory(salt_client, nodename, pillar)
+        except RemoteCmdError as e:
+            logger.critical("Could not adjust memory: " + e.stderr)
+            sys.exit(1)
+
+        logger.info("Waiting for installation to finish ...")
+        wait_for_installation_to_finish(salt_client, jid, pillar)
+
+        logger.info("Waiting for node startup ...")
+        time.sleep(10)
+
+    logger.info("Trying to connect via SSH ...")
     try:
-        libvirt_domains = libvirt_get_domains(
-            salt_client, pillar['machine']['hypervisor'])
-    except RemoteCmdError as e:
-        logger.critical("Could not get domains: " + e.stderr)
+        connection = ssh_connect_to_new_host(nodename, ssh_key)
+    except paramiko.SSHException as e:
+        logger.critical("SSH connection failed: {}".format(e.message))
+        sys.exit(1)
+    except socket.timeout:
+        logger.critical("SSH connection timed out.")
         sys.exit(1)
 
-    if nodename in libvirt_domains:
-        logger.error("The domain already exists on the hypervisor. Use "
-                     "--reinstall to recreate the domain.")
-        sys.exit(1)
+    if not args.skip_salt_keygen:
+        logger.info("Generating new salt keys ...")
+        keys = generate_salt_keys(nodename, directory=temp_keydir)
+    else:
+        logger.info("Loading salt keys from disk ...")
+        keys = load_salt_keys(nodename, directory=temp_keydir)
+        if keys is None:
+            logger.critical("Salt keys not found in \"{}\"".format(
+                temp_keydir))
+            sys.exit(1)
 
-    logger.info("Starting installation ...")
-    jid = start_installation(salt_client, nodename, pillar, primary_interface)
+    master_accept_minion_keys(nodename, keys)
 
-    logger.info("Adjusting memory ...")
-    try:
-        adjust_memory(salt_client, nodename, pillar)
-    except RemoteCmdError as e:
-        logger.critical("Could not adjust memory: " + e.stderr)
-        sys.exit(1)
+    logger.info("Copying salt keys to minion ...")
+    copy_salt_keys_to_minion(connection, keys)
 
-    logger.info("Waiting for installation to finish ...")
-    wait_for_installation_to_finish(salt_client, jid, pillar)
+    logger.info("Starting salt minion ...")
+    start_minion(connection)
+    connection.close()
+
+    logger.info("Finished successfully!")
+
 
 if __name__ == '__main__':
     main()
