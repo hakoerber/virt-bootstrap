@@ -264,6 +264,8 @@ def ssh_connect_to_new_host(nodename, ssh_key):
 
 def read_ssh_key(directory):
     private_key_file = os.path.join(directory, 'id_rsa')
+    if not os.path.exists(private_key_file):
+        return None
     ssh_key = paramiko.RSAKey.from_private_key_file(filename=private_key_file,
                                                     password=None)
     return ssh_key
@@ -379,6 +381,10 @@ def main():
     else:
         logger.info("Reloading key from disk ...")
         ssh_key = read_ssh_key(temp_keydir)
+        if ssh_key is None:
+            logger.critical("SSH key not found in \"{}\"".format(
+                temp_keydir))
+            sys.exit(1)
 
     salt_client = salt.client.LocalClient()
 
