@@ -66,6 +66,7 @@ def parse_args():
     parser.add_argument("--overwrite-cobbler", action='store_true')
     parser.add_argument("--skip-install", action='store_true')
     parser.add_argument("--skip-salt-keygen", action='store_true')
+    parser.add_argument("--no-finalize", action='store_true')
     return parser.parse_args(sys.argv[1:])
 
 
@@ -260,6 +261,16 @@ def ssh_connect_to_new_host(nodename, ssh_key):
     except socket.timeout:
         raise
     return client
+
+
+def delete_ssh_key(directory):
+    private_key_file = os.path.join(directory, 'id_rsa')
+    public_key_file = private_key_file + '.pub'
+    for key in (private_key_file, public_key_file):
+        try:
+            os.remove(key)
+        except OSError:
+            raise
 
 
 def read_ssh_key(directory):
@@ -463,6 +474,21 @@ def main():
 
     logger.info("Starting salt minion ...")
     start_minion(connection)
+
+    if not args.no_finalize:
+        logger.info("Cleaning authorized key file on new node ...")
+        try:
+            connection.exec_command("echo > /root/.ssh/authorized_keys")
+        except paramiko.SSHException as e:
+            logger.critical("Key cleanup failed: {}".format(e.message))
+            sys.exit(1)
+
+        logger.info("Removing ephemeral SSH key ...")
+        try:
+            delete_ssh_key(temp_keydir)
+        except OSError as e:
+            logger.critical("Removing SSH key failed: {}".format(e.message))
+
     connection.close()
 
     logger.info("Finished successfully!")
