@@ -478,7 +478,7 @@ def main():
     if not args.no_finalize:
         logger.info("Cleaning authorized key file on new node ...")
         try:
-            connection.exec_command("echo > /root/.ssh/authorized_keys")
+            connection.exec_command("> /root/.ssh/authorized_keys")
         except paramiko.SSHException as e:
             logger.critical("Key cleanup failed: {}".format(e.message))
             sys.exit(1)
