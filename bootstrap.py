@@ -28,6 +28,12 @@ INSTALLATION_TIMEOUT = 600
 # installation is finished
 SSH_TIMEOUT = 60
 
+# How long to wait until ping is successful after node startup
+STARTUP_TIMEOUT = 60
+
+# Seconds between pings when pinging new node
+PING_SPACING = 1
+
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
@@ -158,8 +164,13 @@ def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
         raise
 
 
-def libvirt_get_domains(salt_client, hypervisor):
-    args_virt_domains = ['virsh', 'list', '--all', '--name']
+def libvirt_get_domains(salt_client, hypervisor, only_active=False):
+    args_virt_domains = ['virsh', 'list', '--name']
+    if only_active:
+        args_virt_domains.append('--state-running')
+    else:
+        args_virt_domains.append('--all')
+
     try:
         result = execute_with_salt(salt_client,
                                    target=hypervisor,
@@ -167,6 +178,16 @@ def libvirt_get_domains(salt_client, hypervisor):
     except RemoteCmdError:
         raise
     return [domain.strip() for domain in result['stdout'].splitlines()]
+
+
+def libvirt_start_domain(salt_client, hypervisor, domain):
+    args_virt_start_domain = ['virsh', 'start', domain]
+    try:
+        execute_with_salt(salt_client,
+                          target=hypervisor,
+                          command=args_virt_start_domain)
+    except RemoteCmdError:
+        raise
 
 
 def start_installation(salt_client, nodename, pillar, primary_interface):
@@ -195,12 +216,14 @@ def start_installation(salt_client, nodename, pillar, primary_interface):
             mac=primary_interface['mac']),
         '--graphics', 'spice',
         '--wait', '-1', # wait an hour, a negative value would mean wait forever
+        '--noreboot',
         '--noautoconsole']
 
     logger.debug("cmd: " + " ".join(args_virt_install))
     jid = salt_client.cmd_async(pillar['machine']['hypervisor'],
                                 'cmd.run_all',
                                 [" ".join(args_virt_install)])
+    logger.debug("Started jid {}.".format(jid))
     return jid
 
 
@@ -227,17 +250,18 @@ def adjust_memory(salt_client, nodename, pillar):
 
 
 def wait_for_installation_to_finish(salt_client, jid, pillar):
-    result = salt_client.get_cli_returns(
+    logger.debug("Waiting for jid {} ...".format(jid))
+    target = pillar['machine']['hypervisor']
+    results = salt_client.get_cli_returns(
         jid, [pillar['machine']['hypervisor']], timeout=INSTALLATION_TIMEOUT)
-    try:
-        result = result.next()[pillar['machine']['hypervisor']]['ret']
-    except KeyError:
-        logger.critical("Installation timed out.")
-        sys.exit(1)
-    if result['retcode'] != 0:
-        logger.critical("Installation failed: " + result['stderr'])
-    logger.debug(result['stdout'])
-
+    for result in results:
+        if target in result.keys():
+            result = result[target]['ret']
+            if result['retcode'] != 0:
+                logger.critical("Installation failed: " + result['stderr'])
+                sys.exit(1)
+            else:
+                return
 
 
 def generate_ssh_key():
@@ -367,6 +391,63 @@ def get_authorized_key_line(key, comment):
         comment=comment)
 
 
+def start_update_environment(salt_client, pillar):
+    # we need to update (a.k.a. run highstate on):
+    # - DNS servers
+    # - DHCP servers
+    servers = set()
+
+    for domain, dominfo in pillar['domain'].items():
+        nameservers = dominfo['applications']['dns']['zoneinfo']['nameservers']
+        for nameserver in nameservers:
+            fqdn = nameserver['name'] + '.' + domain
+            servers.add(fqdn)
+
+    for network, netinfo in pillar['network'].items():
+        dhcpservers = netinfo['applications']['dhcp']['servers']
+        for dhcpserver in dhcpservers:
+            fqdn = dhcpserver['name'] + '.' + netinfo['domain']
+            servers.add(fqdn)
+
+    servers = list(servers)
+
+    jid = salt_client.cmd_async(
+        tgt=servers,
+        fun='state.highstate',
+        kwarg={'queue': True},
+        expr_form='list')
+    logger.debug("Started jid {}.".format(jid))
+    return (jid, servers)
+
+
+def wait_for_environment_update(salt_client, jid, servers):
+    logger.debug("Waiting for jid {} ...".format(jid))
+    result = salt_client.get_cli_returns(jid, servers)
+    for _ in result:
+        pass
+
+
+def wait_for_ping(target, timeout, spacing):
+    logger.debug("Waiting for successful ping to \"{}\".".format(target))
+    while timeout > 0:
+        timeout -= spacing
+
+        ping_args = ['ping',
+                     '-c', '1',
+                     '-w', '1',
+                     '-q', target]
+        process = subprocess.Popen(ping_args, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE)
+        returncode = process.wait()
+
+        if returncode == 0:
+            logger.debug("Ping successful.")
+            return True
+        logger.debug("Ping: no response")
+        time.sleep(spacing)
+    return False
+
+
 def main():
     args = parse_args()
     nodename = args.nodename
@@ -378,6 +459,9 @@ def main():
     setup_logger(console_level)
 
     pillar = get_pillar(nodename)
+    if len(pillar) == 0:
+        logger.critical("No pillar data found for node \"{}\".".format(nodename))
+        sys.exit(1)
 
     primary_interface = get_primary_interface(pillar)
     cobbler_server = get_cobbler_server(pillar, primary_interface)
@@ -416,6 +500,9 @@ def main():
         logger.critical("Could not setup cobbler: " + e.stderr)
         sys.exit(1)
 
+    logger.info("Preparing environment for new node ...")
+    (env_jid, servers) = start_update_environment(salt_client, pillar)
+
     if not args.skip_install:
         try:
             libvirt_domains = libvirt_get_domains(
@@ -430,8 +517,8 @@ def main():
             sys.exit(1)
 
         logger.info("Starting installation ...")
-        jid = start_installation(salt_client, nodename, pillar,
-                                 primary_interface)
+        install_jid = start_installation(salt_client, nodename, pillar,
+                                         primary_interface)
 
         logger.info("Adjusting memory ...")
         try:
@@ -441,10 +528,36 @@ def main():
             sys.exit(1)
 
         logger.info("Waiting for installation to finish ...")
-        wait_for_installation_to_finish(salt_client, jid, pillar)
+        wait_for_installation_to_finish(salt_client, install_jid, pillar)
+
+        logger.info("Waiting for environment preparation to finish ...")
+        wait_for_environment_update(salt_client, env_jid, servers)
+
+    try:
+        libvirt_active_domains = libvirt_get_domains(
+            salt_client, pillar['machine']['hypervisor'], only_active=True)
+    except RemoteCmdError as e:
+        logger.critical("Could not get domains: " + e.stderr)
+        sys.exit(1)
+    if nodename in libvirt_active_domains:
+        logger.info("No need to start domain, already active.")
+    else:
+        logger.info("Starting node ...")
+        try:
+            libvirt_start_domain(salt_client, pillar['machine']['hypervisor'],
+                                 nodename)
+        except RemoteCmdError as e:
+            logger.critical("Could not start node: " + e.stderr)
+            sys.exit(1)
 
         logger.info("Waiting for node startup ...")
-        time.sleep(10)
+        if not wait_for_ping(target=nodename, timeout=STARTUP_TIMEOUT,
+                            spacing=PING_SPACING):
+            logger.critical("Host not responding to ping.")
+            sys.exit(1)
+
+        logger.info("Waiting 5 seconds for SSH server startup on node ...")
+        time.sleep(5)
 
     logger.info("Trying to connect via SSH ...")
     try:
@@ -471,6 +584,10 @@ def main():
 
     logger.info("Copying salt keys to minion ...")
     copy_salt_keys_to_minion(connection, keys)
+
+    # some grace time before starting the minion, or else it might generate its
+    # own keys
+    time.sleep(1)
 
     logger.info("Starting salt minion ...")
     start_minion(connection)
