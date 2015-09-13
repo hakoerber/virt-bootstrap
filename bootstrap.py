@@ -448,6 +448,24 @@ def wait_for_ping(target, timeout, spacing):
     return False
 
 
+def salt_test_connection(salt_client, nodename):
+    result = salt_client.cmd(
+        tgt=nodename,
+        fun='test.ping',
+        timeout=30)
+    return result[nodename]
+
+
+def salt_trigger_highstate(salt_client, nodename):
+    result = salt_client.cmd(
+        tgt=nodename,
+        fun='state.highstate',
+        timeout=5*60)
+    result = result[nodename]
+    state_results = [state['result'] for state in result.values()]
+    return all(state_results)
+
+
 def main():
     args = parse_args()
     nodename = args.nodename
@@ -591,6 +609,16 @@ def main():
 
     logger.info("Starting salt minion ...")
     start_minion(connection)
+
+    logger.info("Testing minion connection ...")
+    if not salt_test_connection(salt_client, nodename):
+        logger.critical("Minion did not show up.")
+        sys.exit(1)
+
+    logger.info("Triggering highstate on minion ...")
+    if not salt_trigger_highstate(salt_client, nodename):
+        logger.critical("Highstate failed.")
+        sys.exit(1)
 
     if not args.no_finalize:
         logger.info("Cleaning authorized key file on new node ...")
