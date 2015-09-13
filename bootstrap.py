@@ -453,7 +453,10 @@ def salt_test_connection(salt_client, nodename):
         tgt=nodename,
         fun='test.ping',
         timeout=30)
-    return result[nodename]
+    try:
+        return result[nodename]
+    except KeyError:
+        return False
 
 
 def salt_trigger_highstate(salt_client, nodename):
@@ -609,6 +612,9 @@ def main():
 
     logger.info("Starting salt minion ...")
     start_minion(connection)
+
+    # give salt some time to connect
+    time.sleep(5)
 
     logger.info("Testing minion connection ...")
     if not salt_test_connection(salt_client, nodename):
