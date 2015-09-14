@@ -109,10 +109,14 @@ def get_pillar(nodename):
 
 
 def get_primary_interface(pillar):
-    if len(pillar.get('interfaces')) == 1:
-        primary_interface = pillar.get('interfaces')
+    interfaces = pillar.get('interfaces')
+    if interfaces is None:
+        logger.critical("No interfaces defined for node.")
+        sys.exit(1)
+    if len(interfaces) == 1:
+        primary_interface = interfaces
     else:
-        primary_interfaces = {k: v for k, v  in pillar.get('interfaces').items()
+        primary_interfaces = {k: v for k, v  in interfaces.items()
                               if v.get('primary', False)}
         if len(primary_interfaces) != 1:
             logger.critical(
