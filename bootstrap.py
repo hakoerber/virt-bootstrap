@@ -408,7 +408,7 @@ def copy_salt_keys_to_minion(ssh_connection, keys):
 
 
 def start_minion(ssh_connection):
-    ssh_connection.exec_command('systemctl start salt-minion')
+    ssh_connection.exec_command('systemctl restart salt-minion')
 
 
 def get_authorized_key_line(key, comment):
