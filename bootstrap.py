@@ -586,8 +586,9 @@ def main():
         logger.info("Waiting for installation to finish ...")
         wait_for_installation_to_finish(salt_client, install_jid, pillar)
 
-        logger.info("Waiting for environment preparation to finish ...")
-        wait_for_environment_update(salt_client, env_jid, servers)
+        if not args.no_prepare_env:
+            logger.info("Waiting for environment preparation to finish ...")
+            wait_for_environment_update(salt_client, env_jid, servers)
 
     try:
         libvirt_active_domains = libvirt_get_domains(
