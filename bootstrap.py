@@ -75,9 +75,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description='Boostrap a new machine')
     parser.add_argument('nodename')
     parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--no-cobbler", action='store_true')
     parser.add_argument("--overwrite-cobbler", action='store_true')
+    parser.add_argument("--no-ssh", action='store_true')
     parser.add_argument("--skip-install", action='store_true')
     parser.add_argument("--skip-salt-keygen", action='store_true')
+    parser.add_argument("--no-prepare-env", action='store_true')
+    parser.add_argument("--skip-salt-run", action='store_true')
     parser.add_argument("--no-finalize", action='store_true')
     parser.add_argument("--regen-host-keys", action='store_true')
     parser.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
@@ -512,44 +516,48 @@ def main():
         sys.exit(1)
 
     primary_interface = get_primary_interface(pillar)
-    cobbler_server = get_cobbler_server(pillar, primary_interface)
 
     temp_keydir = '/root/{}.d'.format(nodename)
-    if not args.skip_install:
-        logger.info("Generating ephemeral SSH key ...")
-        ssh_key = generate_ssh_key()
+    if not args.no_ssh:
+        if not args.skip_install:
+            logger.info("Generating ephemeral SSH key ...")
+            ssh_key = generate_ssh_key()
 
-        logger.info("Saving SSH keys to \"{}\".".format(temp_keydir))
-        save_ssh_key(ssh_key, temp_keydir)
-    else:
-        logger.info("Reloading key from disk ...")
-        ssh_key = read_ssh_key(temp_keydir)
-        if ssh_key is None:
-            logger.critical("SSH key not found in \"{}\"".format(
-                temp_keydir))
-            sys.exit(1)
+            logger.info("Saving SSH keys to \"{}\".".format(temp_keydir))
+            save_ssh_key(ssh_key, temp_keydir)
+        else:
+            logger.info("Reloading key from disk ...")
+            ssh_key = read_ssh_key(temp_keydir)
+            if ssh_key is None:
+                logger.critical("SSH key not found in \"{}\"".format(
+                    temp_keydir))
+                sys.exit(1)
 
     salt_client = salt.client.LocalClient()
 
-    try:
-        cobbler_systems = cobbler_get_systems(salt_client, cobbler_server)
-    except RemoteCmdError as e:
-        logger.critical("Could not get cobbler systems: " + e.stderr)
-    if nodename in cobbler_systems and not args.overwrite_cobbler:
-        logger.critical("A system with the same name already exists on the "
-                        "cobbler server. Use --overwrite-cobbler to overwrite.")
-        sys.exit(1)
+    if not args.no_cobbler:
+        cobbler_server = get_cobbler_server(pillar, primary_interface)
+        try:
+            cobbler_systems = cobbler_get_systems(salt_client, cobbler_server)
+        except RemoteCmdError as e:
+            logger.critical("Could not get cobbler systems: " + e.stderr)
+        if nodename in cobbler_systems and not args.overwrite_cobbler:
+            logger.critical("A system with the same name already exists on the "
+                            "cobbler server. Use --overwrite-cobbler to "
+                            "overwrite.")
+            sys.exit(1)
 
-    logger.info("Setting up cobbler ...")
-    try:
-        setup_cobbler(salt_client, cobbler_server, nodename, pillar,
-                      primary_interface, ssh_key)
-    except RemoteCmdError as e:
-        logger.critical("Could not setup cobbler: " + e.stderr)
-        sys.exit(1)
+        logger.info("Setting up cobbler ...")
+        try:
+            setup_cobbler(salt_client, cobbler_server, nodename, pillar,
+                        primary_interface, ssh_key)
+        except RemoteCmdError as e:
+            logger.critical("Could not setup cobbler: " + e.stderr)
+            sys.exit(1)
 
-    logger.info("Preparing environment for new node ...")
-    (env_jid, servers) = start_update_environment(salt_client, pillar)
+    if not args.no_prepare_env:
+        logger.info("Preparing environment for new node ...")
+        (env_jid, servers) = start_update_environment(salt_client, pillar)
 
     if not args.skip_install:
         try:
@@ -607,38 +615,41 @@ def main():
         logger.info("Waiting 5 seconds for SSH server startup on node ...")
         time.sleep(5)
 
-    logger.info("Trying to connect via SSH ...")
-    try:
-        connection = ssh_connect_to_new_host(nodename, ssh_key)
-    except paramiko.SSHException as e:
-        logger.critical("SSH connection failed: {}".format(e.message))
-        sys.exit(1)
-    except socket.timeout:
-        logger.critical("SSH connection timed out.")
-        sys.exit(1)
-
-    if not args.skip_salt_keygen:
-        logger.info("Generating new salt keys ...")
-        keys = generate_salt_keys(nodename, directory=temp_keydir)
-    else:
-        logger.info("Loading salt keys from disk ...")
-        keys = load_salt_keys(nodename, directory=temp_keydir)
-        if keys is None:
-            logger.critical("Salt keys not found in \"{}\"".format(
-                temp_keydir))
+    if not args.no_ssh:
+        logger.info("Trying to connect via SSH ...")
+        try:
+            connection = ssh_connect_to_new_host(nodename, ssh_key)
+        except paramiko.SSHException as e:
+            logger.critical("SSH connection failed: {}".format(e.message))
+            sys.exit(1)
+        except socket.timeout:
+            logger.critical("SSH connection timed out.")
             sys.exit(1)
 
-    master_accept_minion_keys(nodename, keys)
+        if not args.skip_salt_keygen:
+            logger.info("Generating new salt keys ...")
+            keys = generate_salt_keys(nodename, directory=temp_keydir)
+        else:
+            logger.info("Loading salt keys from disk ...")
+            keys = load_salt_keys(nodename, directory=temp_keydir)
+            if keys is None:
+                logger.critical("Salt keys not found in \"{}\"".format(
+                    temp_keydir))
+                sys.exit(1)
 
-    logger.info("Copying salt keys to minion ...")
-    copy_salt_keys_to_minion(connection, keys)
+        master_accept_minion_keys(nodename, keys)
 
-    # some grace time before starting the minion, or else it might generate its
-    # own keys
-    time.sleep(1)
+        logger.info("Copying salt keys to minion ...")
+        copy_salt_keys_to_minion(connection, keys)
 
-    logger.info("Starting salt minion ...")
-    start_minion(connection)
+        # some grace time before starting the minion, or else it might generate
+        # its own keys
+        time.sleep(1)
+
+        logger.info("Starting salt minion ...")
+        start_minion(connection)
+
+
     host_key_dir = args.host_key_dir.format(environment=args.salt_env)
     logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
     if ((not host_keys_exist(nodename, host_key_dir)) or
@@ -651,17 +662,18 @@ def main():
     # give salt some time to connect
     time.sleep(5)
 
-    logger.info("Testing minion connection ...")
-    if not salt_test_connection(salt_client, nodename):
-        logger.critical("Minion did not show up.")
-        sys.exit(1)
+    if not args.skip_salt_run:
+        logger.info("Testing minion connection ...")
+        if not salt_test_connection(salt_client, nodename):
+            logger.critical("Minion did not show up.")
+            sys.exit(1)
 
-    logger.info("Triggering highstate on minion ...")
-    if not salt_trigger_highstate(salt_client, nodename):
-        logger.critical("Highstate failed.")
-        sys.exit(1)
+        logger.info("Triggering highstate on minion ...")
+        if not salt_trigger_highstate(salt_client, nodename):
+            logger.critical("Highstate failed.")
+            sys.exit(1)
 
-    if not args.no_finalize:
+    if not (args.no_finalize or args.no_ssh):
         logger.info("Cleaning authorized key file on new node ...")
         try:
             connection.exec_command("> /root/.ssh/authorized_keys")
@@ -675,7 +687,7 @@ def main():
         except OSError as e:
             logger.critical("Removing SSH key failed: {}".format(e.message))
 
-    connection.close()
+        connection.close()
 
     logger.info("Finished successfully!")
 
