@@ -34,6 +34,12 @@ STARTUP_TIMEOUT = 60
 # Seconds between pings when pinging new node
 PING_SPACING = 1
 
+# The default salt environment (producion, dev, ...)
+DEFAULT_SALT_ENV = 'base'
+
+# Where to store SSH host keys. They will be stored in a subdirectory named
+# after the host they belong to
+DEFAULT_HOST_KEY_DIR = '/srv/salt/{environment}/files/ssh/hostkeys/'
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
@@ -73,6 +79,11 @@ def parse_args():
     parser.add_argument("--skip-install", action='store_true')
     parser.add_argument("--skip-salt-keygen", action='store_true')
     parser.add_argument("--no-finalize", action='store_true')
+    parser.add_argument("--regen-host-keys", action='store_true')
+    parser.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
+                        metavar='ENV')
+    parser.add_argument("--host-key-dir", action='store',
+                        default=DEFAULT_HOST_KEY_DIR, metavar='DIR')
     return parser.parse_args(sys.argv[1:])
 
 
@@ -301,8 +312,8 @@ def delete_ssh_key(directory):
             raise
 
 
-def read_ssh_key(directory):
-    private_key_file = os.path.join(directory, 'id_rsa')
+def read_ssh_key(directory, name='id_rsa'):
+    private_key_file = os.path.join(directory, name)
     if not os.path.exists(private_key_file):
         return None
     ssh_key = paramiko.RSAKey.from_private_key_file(filename=private_key_file,
@@ -310,11 +321,23 @@ def read_ssh_key(directory):
     return ssh_key
 
 
-def save_ssh_key(ssh_key, directory):
+def generate_host_keys(nodename, directory):
+    key = generate_ssh_key()
+    target = os.path.join(directory, nodename)
+    save_ssh_key(key, target, name='ssh_host_rsa_key')
+
+
+def host_keys_exist(nodename, directory):
+    target = os.path.join(directory, nodename)
+    logger.debug("Looking for host keys in \"{}\".".format(target))
+    return (read_ssh_key(target, name='ssh_host_rsa_key') is not None)
+
+
+def save_ssh_key(ssh_key, directory, name='id_rsa'):
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-    private_key_file = os.path.join(directory, 'id_rsa')
+    private_key_file = os.path.join(directory, name)
     ssh_key.write_private_key_file(private_key_file)
     with open(private_key_file + '.pub', 'w') as public_file:
         public_file.write("{name} {key} {comment}".format(
@@ -616,6 +639,14 @@ def main():
 
     logger.info("Starting salt minion ...")
     start_minion(connection)
+    host_key_dir = args.host_key_dir.format(environment=args.salt_env)
+    logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
+    if ((not host_keys_exist(nodename, host_key_dir)) or
+            args.regen_host_keys):
+        logger.info("Generating SSH host keys ...")
+        generate_host_keys(nodename, host_key_dir)
+    else:
+        logger.info("SSH host keys already exist, not regenerating.")
 
     # give salt some time to connect
     time.sleep(5)
