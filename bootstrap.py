@@ -78,10 +78,10 @@ def parse_args():
     parser.add_argument("--no-cobbler", action='store_true')
     parser.add_argument("--overwrite-cobbler", action='store_true')
     parser.add_argument("--no-ssh", action='store_true')
-    parser.add_argument("--skip-install", action='store_true')
-    parser.add_argument("--skip-salt-keygen", action='store_true')
+    parser.add_argument("--no-install", action='store_true')
+    parser.add_argument("--no-salt-keygen", action='store_true')
     parser.add_argument("--no-prepare-env", action='store_true')
-    parser.add_argument("--skip-salt-run", action='store_true')
+    parser.add_argument("--no-salt-run", action='store_true')
     parser.add_argument("--no-finalize", action='store_true')
     parser.add_argument("--regen-host-keys", action='store_true')
     parser.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
@@ -519,7 +519,7 @@ def main():
 
     temp_keydir = '/root/{}.d'.format(nodename)
     if not args.no_ssh:
-        if not args.skip_install:
+        if not args.no_install:
             logger.info("Generating ephemeral SSH key ...")
             ssh_key = generate_ssh_key()
 
@@ -559,7 +559,7 @@ def main():
         logger.info("Preparing environment for new node ...")
         (env_jid, servers) = start_update_environment(salt_client, pillar)
 
-    if not args.skip_install:
+    if not args.no_install:
         try:
             libvirt_domains = libvirt_get_domains(
                 salt_client, pillar['machine']['hypervisor'])
@@ -627,7 +627,7 @@ def main():
             logger.critical("SSH connection timed out.")
             sys.exit(1)
 
-        if not args.skip_salt_keygen:
+        if not args.no_salt_keygen:
             logger.info("Generating new salt keys ...")
             keys = generate_salt_keys(nodename, directory=temp_keydir)
         else:
@@ -663,7 +663,7 @@ def main():
     # give salt some time to connect
     time.sleep(5)
 
-    if not args.skip_salt_run:
+    if not args.no_salt_run:
         logger.info("Testing minion connection ...")
         if not salt_test_connection(salt_client, nodename):
             logger.critical("Minion did not show up.")
