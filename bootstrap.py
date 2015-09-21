@@ -83,6 +83,8 @@ def parse_args():
     parser.add_argument("--no-prepare-env", action='store_true')
     parser.add_argument("--no-salt-run", action='store_true')
     parser.add_argument("--no-finalize", action='store_true')
+    parser.add_argument("--no-hostkeys", action='store_true')
+    parser.add_argument("--no-ensure-state", action='store_true')
     parser.add_argument("--regen-host-keys", action='store_true')
     parser.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
                         metavar='ENV')
@@ -541,6 +543,7 @@ def main():
 
     primary_interface = get_primary_interface(pillar)
 
+    ssh_key = None
     temp_keydir = '/root/{}.d'.format(nodename)
     if not args.no_ssh:
         if not args.no_install:
@@ -574,7 +577,7 @@ def main():
         logger.info("Setting up cobbler ...")
         try:
             setup_cobbler(salt_client, cobbler_server, nodename, pillar,
-                        primary_interface, ssh_key)
+                          primary_interface, ssh_key)
         except RemoteCmdError as e:
             logger.critical("Could not setup cobbler: " + e.stderr)
             sys.exit(1)
@@ -614,31 +617,33 @@ def main():
             logger.info("Waiting for environment preparation to finish ...")
             wait_for_environment_update(salt_client, env_jid, servers)
 
-    try:
-        libvirt_active_domains = libvirt_get_domains(
-            salt_client, pillar['machine']['hypervisor'], only_active=True)
-    except RemoteCmdError as e:
-        logger.critical("Could not get domains: " + e.stderr)
-        sys.exit(1)
-    if nodename in libvirt_active_domains:
-        logger.info("No need to start domain, already active.")
-    else:
-        logger.info("Starting node ...")
+    if not args.no_ensure_state:
         try:
-            libvirt_start_domain(salt_client, pillar['machine']['hypervisor'],
-                                 nodename)
+            libvirt_active_domains = libvirt_get_domains(
+                salt_client, pillar['machine']['hypervisor'], only_active=True)
         except RemoteCmdError as e:
-            logger.critical("Could not start node: " + e.stderr)
+            logger.critical("Could not get domains: " + e.stderr)
             sys.exit(1)
+        if nodename in libvirt_active_domains:
+            logger.info("No need to start domain, already active.")
+        else:
+            logger.info("Starting node ...")
+            try:
+                libvirt_start_domain(salt_client,
+                                     pillar['machine']['hypervisor'],
+                                     nodename)
+            except RemoteCmdError as e:
+                logger.critical("Could not start node: " + e.stderr)
+                sys.exit(1)
 
-        logger.info("Waiting for node startup ...")
-        if not wait_for_ping(target=nodename, timeout=STARTUP_TIMEOUT,
-                            spacing=PING_SPACING):
-            logger.critical("Host not responding to ping.")
-            sys.exit(1)
+            logger.info("Waiting for node startup ...")
+            if not wait_for_ping(target=nodename, timeout=STARTUP_TIMEOUT,
+                                 spacing=PING_SPACING):
+                logger.critical("Host not responding to ping.")
+                sys.exit(1)
 
-        logger.info("Waiting 5 seconds for SSH server startup on node ...")
-        time.sleep(5)
+            logger.info("Waiting 5 seconds for SSH server startup on node ...")
+            time.sleep(5)
 
     if not args.no_ssh:
         logger.info("Trying to connect via SSH ...")
@@ -675,19 +680,20 @@ def main():
         start_minion(connection)
 
 
-    host_key_dir = args.host_key_dir.format(environment=args.salt_env)
-    logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
-    if ((not host_keys_exist(nodename, host_key_dir)) or
-            args.regen_host_keys):
-        logger.info("Generating SSH host keys ...")
-        generate_host_keys(nodename, host_key_dir)
-    else:
-        logger.info("SSH host keys already exist, not regenerating.")
+    if not args.no_hostkeys:
+        host_key_dir = args.host_key_dir.format(environment=args.salt_env)
+        logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
+        if ((not host_keys_exist(nodename, host_key_dir)) or
+                args.regen_host_keys):
+            logger.info("Generating SSH host keys ...")
+            generate_host_keys(nodename, host_key_dir)
+        else:
+            logger.info("SSH host keys already exist, not regenerating.")
 
-    # give salt some time to connect
-    time.sleep(5)
 
     if not args.no_salt_run:
+        # give salt some time to connect
+        time.sleep(5)
         logger.info("Testing minion connection ...")
         if not salt_test_connection(salt_client, nodename):
             logger.critical("Minion did not show up.")
