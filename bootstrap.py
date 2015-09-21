@@ -191,7 +191,8 @@ def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
         gateway = network['default_gateway']
         netmask = network['netmask']
         nameservers = [ns['ip'] for ns in
-                       domain['applications']['dns']['zoneinfo']['nameservers']]
+                       domain['applications']['dns']['zoneinfo']['nameservers']
+                       if ns['ip'] != ip_address]
 
         args_cobbler.extend([
             '--static', 'true',
@@ -282,8 +283,6 @@ def adjust_memory(salt_client, nodename, pillar):
             'setmaxmem',
             nodename, str(mem) + 'M',
             '--config']
-        logger.debug("Sleeping 5 seconds to wait for machine startup.")
-        time.sleep(5)
         try:
             execute_with_salt(salt_client,
                               target=pillar['machine']['hypervisor'],
@@ -605,15 +604,15 @@ def main():
         install_jid = start_installation(salt_client, nodename, pillar,
                                          primary_interface)
 
+        logger.info("Waiting for installation to finish ...")
+        wait_for_installation_to_finish(salt_client, install_jid, pillar)
+
         logger.info("Adjusting memory ...")
         try:
             adjust_memory(salt_client, nodename, pillar)
         except RemoteCmdError as e:
             logger.critical("Could not adjust memory: " + e.stderr)
             sys.exit(1)
-
-        logger.info("Waiting for installation to finish ...")
-        wait_for_installation_to_finish(salt_client, install_jid, pillar)
 
         if not args.no_prepare_env:
             logger.info("Waiting for environment preparation to finish ...")
