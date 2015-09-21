@@ -448,7 +448,7 @@ def get_authorized_key_line(key, comment):
         comment=comment)
 
 
-def start_update_environment(salt_client, pillar):
+def start_update_environment(nodename, salt_client, pillar):
     # we need to update (a.k.a. run highstate on):
     # - DNS servers
     # - DHCP servers
@@ -466,7 +466,8 @@ def start_update_environment(salt_client, pillar):
             fqdn = dhcpserver['name'] + '.' + netinfo['domain']
             servers.add(fqdn)
 
-    servers = list(servers)
+    # filter ourselves out
+    servers = [server for server in servers if server != nodename]
 
     jid = salt_client.cmd_async(
         tgt=servers,
@@ -584,7 +585,8 @@ def main():
 
     if not args.no_prepare_env:
         logger.info("Preparing environment for new node ...")
-        (env_jid, servers) = start_update_environment(salt_client, pillar)
+        (env_jid, servers) = start_update_environment(
+            nodename, salt_client, pillar)
 
     if not args.no_install:
         try:
