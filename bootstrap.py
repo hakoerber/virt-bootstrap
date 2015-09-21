@@ -522,8 +522,13 @@ def salt_trigger_highstate(salt_client, nodename):
         fun='state.highstate',
         timeout=5*60)
     result = result[nodename]
-    state_results = [state['result'] for state in result.values()]
-    return all(state_results)
+    failed_states = list()
+    all_ok = True
+    for state in result.values():
+        if not state['result']:
+            all_ok = False
+            failed_states.append(state)
+    return (all_ok, failed_states)
 
 
 def main():
@@ -701,8 +706,18 @@ def main():
             sys.exit(1)
 
         logger.info("Triggering highstate on minion ...")
-        if not salt_trigger_highstate(salt_client, nodename):
-            logger.critical("Highstate failed.")
+        (all_ok, failed_states) = salt_trigger_highstate(salt_client, nodename)
+        if not all_ok:
+            messages = []
+            for state in failed_states:
+                if state.get('name'):
+                    messages.append('- {name}: {comment}'.format(
+                        name=state['name'],
+                        comment=state['comment']))
+            logger.critical("Highstate failed. Failed states ({count}):\n"
+                            "{states}".format(
+                                count=len(messages),
+                                states='\n'.join(messages)))
             sys.exit(1)
 
     if not (args.no_finalize or args.no_ssh):
