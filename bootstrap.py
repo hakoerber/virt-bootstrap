@@ -169,12 +169,36 @@ def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
                     '--name', nodename,
                     '--profile', pillar['machine']['profile'],
                     '--hostname', nodename,
-                    '--clobber',
-                    '--interface', primary_interface['identifier'],
-                    '--mac-address', primary_interface['mac'],
-                    '--ksmeta', 'authorized_key="{}"'.format(
-                        get_authorized_key_line(ssh_key, 'cobbler').replace(
-                            ' ', r'\ '))]
+                    '--clobber']
+
+    if ssh_key is not None:
+        args_cobbler.extend([
+            '--ksmeta', 'authorized_key="{}"'.format(
+                get_authorized_key_line(ssh_key, 'cobbler').replace(
+                    ' ', r'\ '))])
+
+
+    args_cobbler.extend([
+        '--interface', primary_interface['identifier'],
+        '--mac-address', primary_interface['mac']])
+
+    if primary_interface['mode'] == 'static':
+        ip_address = primary_interface['ip']
+        network = pillar['network'][primary_interface['network']]
+        domain = pillar['domain'][primary_interface['network']]
+        gateway = network['default_gateway']
+        netmask = network['netmask']
+        nameservers = [ns['ip'] for ns in
+                       domain['applications']['dns']['zoneinfo']['nameservers']]
+
+        args_cobbler.extend([
+            '--static', 'true',
+            '--name-servers', '\"{}\"'.format(' '.join(nameservers)),
+            '--gateway', gateway,
+            '--netmask', netmask,
+            '--ip-address', ip_address
+        ])
+
     try:
         execute_with_salt(salt_client,
                           target=cobbler_server,
