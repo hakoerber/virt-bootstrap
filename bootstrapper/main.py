@@ -1,9 +1,10 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 
 import sys
 import argparse
 import time
 import logging
+import os
 import os.path
 import subprocess
 import shutil
@@ -14,6 +15,8 @@ import salt.config
 import salt.runner
 import paramiko
 import paramiko.client
+
+import bootstrapper.creators.libvirt
 
 
 # The minimum amount of memory in MiB that is required for installation.
@@ -40,6 +43,10 @@ DEFAULT_SALT_ENV = 'base'
 # Where to store SSH host keys. They will be stored in a subdirectory named
 # after the host they belong to
 DEFAULT_HOST_KEY_DIR = '/srv/salt/{environment}/files/ssh/hostkeys/'
+
+# Where the SSH key to access the hypervisor is stored
+DEFAULT_SSH_HYPERVISOR_KEY = os.path.join(
+    os.environ.get('HOME', '/root'), '.ssh/id_rsa')
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
@@ -71,7 +78,7 @@ def setup_logger(console_level):
     logger.addHandler(console_handler)
 
 
-def parse_args():
+def parse_args(argv):
     parser = argparse.ArgumentParser(description='Boostrap a new machine')
     parser.add_argument('nodename')
     parser.add_argument("--debug", action='store_true')
@@ -83,6 +90,8 @@ def parse_args():
     parser.add_argument("--no-prepare-env", action='store_true')
     parser.add_argument("--no-salt-run", action='store_true')
     parser.add_argument("--no-finalize", action='store_true')
+    parser.add_argument("--hypervisor-keyfile", action='store', metavar='FILE',
+                        default=DEFAULT_SSH_HYPERVISOR_KEY)
     parser.add_argument("--no-hostkeys", action='store_true')
     parser.add_argument("--no-ensure-state", action='store_true')
     parser.add_argument("--regen-host-keys", action='store_true')
@@ -90,7 +99,7 @@ def parse_args():
                         metavar='ENV')
     parser.add_argument("--host-key-dir", action='store',
                         default=DEFAULT_HOST_KEY_DIR, metavar='DIR')
-    return parser.parse_args(sys.argv[1:])
+    return parser.parse_args(argv[1:])
 
 
 def execute_with_salt(salt_client, target, command, func='cmd'):
@@ -208,104 +217,6 @@ def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
                           command=args_cobbler)
     except RemoteCmdError:
         raise
-
-
-def libvirt_get_domains(salt_client, hypervisor, only_active=False):
-    args_virt_domains = ['virsh', 'list', '--name']
-    if only_active:
-        args_virt_domains.append('--state-running')
-    else:
-        args_virt_domains.append('--all')
-
-    try:
-        result = execute_with_salt(salt_client,
-                                   target=hypervisor,
-                                   command=args_virt_domains)
-    except RemoteCmdError:
-        raise
-    return [domain.strip() for domain in result['stdout'].splitlines()]
-
-
-def libvirt_start_domain(salt_client, hypervisor, domain):
-    args_virt_start_domain = ['virsh', 'start', domain]
-    try:
-        execute_with_salt(salt_client,
-                          target=hypervisor,
-                          command=args_virt_start_domain)
-    except RemoteCmdError:
-        raise
-
-
-def start_installation(salt_client, nodename, pillar, primary_interface):
-    mem = pillar['machine']['memory']
-    if mem < INSTALLATION_MEMORY:
-        logger.debug("Increasing memory from {mem}MiB to {new_mem}MiB for "
-                     "installation, reducing later.".format(
-                         mem=mem, new_mem=INSTALLATION_MEMORY))
-        mem = INSTALLATION_MEMORY
-
-    args_virt_install = [
-        'virt-install',
-        '--connect', 'qemu:///system',
-        '--name', nodename,
-        '--memory', str(mem),
-        '--vcpus', str(pillar['machine']['vcpus']),
-        '--cpu', 'none', # uses hypervisor default
-        '--pxe',
-        '--arch', 'x86_64',
-        '--sound', 'none',
-        '--os-variant', pillar['machine']['os'],
-        '--disk', 'pool=centos,size={size},bus=virtio,discard=unmap'.format(
-            size=pillar['machine']['disk']['size']),
-        '--network', 'network={network},model=virtio,mac={mac}'.format(
-            network=pillar['machine']['network'],
-            mac=primary_interface['mac']),
-        '--graphics', 'spice',
-        '--wait', '-1', # wait an hour, a negative value would mean wait forever
-        '--noreboot',
-        '--noautoconsole']
-
-    logger.debug("cmd: " + " ".join(args_virt_install))
-    jid = salt_client.cmd_async(pillar['machine']['hypervisor'],
-                                'cmd.run_all',
-                                [" ".join(args_virt_install)])
-    logger.debug("Started jid {}.".format(jid))
-    return jid
-
-
-def adjust_memory(salt_client, nodename, pillar):
-    mem = pillar['machine']['memory']
-    if mem < INSTALLATION_MEMORY:
-        logger.debug("Adjusting memory to {mem}MiB".format(mem=mem))
-        args_virt_adjust_mem = [
-            'virsh',
-            '--connect', 'qemu:///system',
-            'setmaxmem',
-            nodename, str(mem) + 'M',
-            '--config']
-        try:
-            execute_with_salt(salt_client,
-                              target=pillar['machine']['hypervisor'],
-                              command=args_virt_adjust_mem)
-        except RemoteCmdError:
-            raise
-    else:
-        logger.debug("No memory adjustment necessary.")
-
-
-def wait_for_installation_to_finish(salt_client, jid, pillar):
-    logger.debug("Waiting for jid {} ...".format(jid))
-    target = pillar['machine']['hypervisor']
-    results = salt_client.get_cli_returns(
-        jid, [pillar['machine']['hypervisor']], timeout=INSTALLATION_TIMEOUT)
-    for result in results:
-        if target in result.keys():
-            result = result[target]['ret']
-            if result['retcode'] != 0:
-                logger.critical("Installation failed: " + result['stderr'])
-                sys.exit(1)
-            else:
-                return
 
 
 def generate_ssh_key():
@@ -531,8 +442,8 @@ def salt_trigger_highstate(salt_client, nodename):
     return (all_ok, failed_states)
 
 
-def main():
-    args = parse_args()
+def main(argv):
+    args = parse_args(argv)
     nodename = args.nodename
     if args.debug:
         console_level = logging.DEBUG
@@ -592,55 +503,84 @@ def main():
         (env_jid, servers) = start_update_environment(
             nodename, salt_client, pillar)
 
+    connection = None
     if not args.no_install:
-        try:
-            libvirt_domains = libvirt_get_domains(
-                salt_client, pillar['machine']['hypervisor'])
-        except RemoteCmdError as e:
-            logger.critical("Could not get domains: " + e.stderr)
-            sys.exit(1)
+        connection = bootstrapper.creators.libvirt.LibvirtConnection(
+            uri='qemu+ssh://root@{hypervisor}/system?keyfile={keyfile}'.format(
+                hypervisor=pillar['machine']['hypervisor'],
+                keyfile=args.hypervisor_keyfile))
+        creator = bootstrapper.creators.libvirt.LibvirtCreator(
+            connection=connection)
+        creator.connect()
 
-        if nodename in libvirt_domains:
+        if creator.domain_exists(nodename):
             logger.error("The domain already exists on the hypervisor. Use "
                          "--reinstall to recreate the domain.")
             sys.exit(1)
 
-        logger.info("Starting installation ...")
-        install_jid = start_installation(salt_client, nodename, pillar,
-                                         primary_interface)
+        logger.info("Creating new virtual machine ...")
+        mem = pillar['machine']['memory']
+        if mem < INSTALLATION_MEMORY:
+            logger.debug("Increasing memory from {mem}MiB to {new_mem}MiB for "
+                        "installation, reducing later.".format(
+                            mem=mem, new_mem=INSTALLATION_MEMORY))
+            mem = INSTALLATION_MEMORY
 
+        print(mem*1024)
+        creator.create(params={
+            'name': nodename,
+            'memory': mem*1024,
+            'vcpus': pillar['machine']['vcpus'],
+            'arch': 'x86_64',
+            'interfaces': [
+                {
+                    'mac': primary_interface['mac'],
+                    'network': pillar['machine']['network']
+                }
+            ],
+            'disks': [
+                {
+                    'pool': 'centos',
+                    'name': nodename,
+                    'size': pillar['machine']['disk']['size']
+                }
+            ]})
+
+        logger.info("Starting installation ...")
+        creator.start(nodename)
         logger.info("Waiting for installation to finish ...")
-        wait_for_installation_to_finish(salt_client, install_jid, pillar)
+        i = 0
+        ok = False
+        while i < INSTALLATION_TIMEOUT:
+            i += 1
+            if not creator.running(nodename):
+                ok = True
+                break
+            time.sleep(1)
+        if not ok:
+            logger.critical("Installation timed out.")
 
         logger.info("Adjusting memory ...")
-        try:
-            adjust_memory(salt_client, nodename, pillar)
-        except RemoteCmdError as e:
-            logger.critical("Could not adjust memory: " + e.stderr)
-            sys.exit(1)
+        creator.set_memory(nodename, pillar['machine']['memory']*1024)
+
+        logger.info("Disabling network boot ...")
+        creator.disable_pxe_boot(nodename)
 
         if not args.no_prepare_env:
             logger.info("Waiting for environment preparation to finish ...")
             wait_for_environment_update(salt_client, env_jid, servers)
 
     if not args.no_ensure_state:
-        try:
-            libvirt_active_domains = libvirt_get_domains(
-                salt_client, pillar['machine']['hypervisor'], only_active=True)
-        except RemoteCmdError as e:
-            logger.critical("Could not get domains: " + e.stderr)
-            sys.exit(1)
-        if nodename in libvirt_active_domains:
+        if connection is None:
+            connection = bootstrapper.creators.libvirt.LibvirtConnection(
+                    uri='qemu+ssh://root@10.1.1.156/system?keyfile=/home/hannes/.ssh/virt_rsa')
+            creator = bootstrapper.creators.libvirt.LibvirtCreator(
+                    connection=connection)
+            creator.connect()
+        if creator.running(nodename):
             logger.info("No need to start domain, already active.")
         else:
-            logger.info("Starting node ...")
-            try:
-                libvirt_start_domain(salt_client,
-                                     pillar['machine']['hypervisor'],
-                                     nodename)
-            except RemoteCmdError as e:
-                logger.critical("Could not start node: " + e.stderr)
-                sys.exit(1)
+            creator.start(nodename)
 
             logger.info("Waiting for node startup ...")
             if not wait_for_ping(target=nodename, timeout=STARTUP_TIMEOUT,
@@ -737,7 +677,3 @@ def main():
         connection.close()
 
     logger.info("Finished successfully!")
-
-
-if __name__ == '__main__':
-    main()

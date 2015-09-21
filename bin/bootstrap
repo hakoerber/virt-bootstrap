@@ -1,0 +1,8 @@
+#!/usr/bin/env python2
+
+import sys
+
+import bootstrapper.main
+
+if __name__ == '__main__':
+    bootstrapper.main.main(sys.argv)
