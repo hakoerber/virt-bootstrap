@@ -2,7 +2,7 @@
 
 class Creator(object):
     def __init__(self, connection):
-        self._connection = connection
+        pass
 
     def connect(self):
         pass

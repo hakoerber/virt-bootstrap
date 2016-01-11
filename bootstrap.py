@@ -4,22 +4,16 @@ import sys
 import argparse
 import time
 import logging
-import os
 import os.path
 import subprocess
 import shutil
 import socket
-import tempfile
-import StringIO
 
-#import salt
-#import salt.config
-#import salt.runner
+import salt
+import salt.config
+import salt.runner
 import paramiko
 import paramiko.client
-
-import bootstrapper.creators.libvirt
-import bootstrapper.salt
 
 
 # The minimum amount of memory in MiB that is required for installation.
@@ -43,19 +37,9 @@ PING_SPACING = 1
 # The default salt environment (producion, dev, ...)
 DEFAULT_SALT_ENV = 'base'
 
-# Salt keysize in bits
-SALT_KEYSIZE = 4096
-
 # Where to store SSH host keys. They will be stored in a subdirectory named
 # after the host they belong to
-DEFAULT_HOST_KEY_DIR = 'files/ssh/hostkeys/'
-
-# Where the SSH key to access the hypervisor is stored
-DEFAULT_SSH_HYPERVISOR_KEY = os.path.join(
-    os.environ.get('HOME', '/root'), '.ssh/id_rsa')
-
-# defaults URL to the salt cherrypy API
-DEFAULT_SALT_URL = 'https://salt:8000'
+DEFAULT_HOST_KEY_DIR = '/srv/salt/{environment}/files/ssh/hostkeys/'
 
 class RemoteCmdError(Exception):
     def __init__(self, retcode, stderr):
@@ -87,51 +71,34 @@ def setup_logger(console_level):
     logger.addHandler(console_handler)
 
 
-def parse_args(argv):
+def parse_args():
     parser = argparse.ArgumentParser(description='Boostrap a new machine')
     parser.add_argument('nodename')
-
-    group = parser.add_argument_group('generic options')
-    group.add_argument("--debug", action='store_true')
-    group.add_argument("--no-install-server", dest="no_cobbler", action='store_true')
-    group.add_argument("--no-create", dest="no_install", action='store_true')
-    group.add_argument("--no-ensure-state", action='store_true')
-    group.add_argument("--no-ssh", action='store_true')
-    group.add_argument("--no-prepare-env", action='store_true')
-    group.add_argument("--no-configure", dest="no_salt_run", action='store_true')
-    group.add_argument("--no-finalize", action='store_true')
-    group.add_argument("--regen-host-keys", action='store_true')
-
-    group = parser.add_argument_group('libvirt options')
-    group.add_argument("--libvirt-keyfile", dest="hypervisor_keyfile",
-                        action='store', metavar='FILE',
-                        default=DEFAULT_SSH_HYPERVISOR_KEY)
-
-    group = parser.add_argument_group('cobbler options')
-    group.add_argument("--overwrite-cobbler", action='store_true')
-
-    group = parser.add_argument_group('salt options')
-    group.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
-                       metavar='ENV')
-    group.add_argument("--host-key-dir", action='store',
-                       default=DEFAULT_HOST_KEY_DIR, metavar='DIR')
-    group.add_argument("--salt-url", action='store',
-                       default=DEFAULT_SALT_URL, metavar='URL')
-    group.add_argument("--salt-user", action='store', metavar='USER',
-                       required=True)
-    group.add_argument("--salt-password", action='store', metavar='PASSWORD',
-                       required=True)
-
-    group.add_argument("--no-salt-keygen", action='store_true')
-    return parser.parse_args(argv[1:])
+    parser.add_argument("--debug", action='store_true')
+    parser.add_argument("--no-cobbler", action='store_true')
+    parser.add_argument("--overwrite-cobbler", action='store_true')
+    parser.add_argument("--no-ssh", action='store_true')
+    parser.add_argument("--no-install", action='store_true')
+    parser.add_argument("--no-salt-keygen", action='store_true')
+    parser.add_argument("--no-prepare-env", action='store_true')
+    parser.add_argument("--no-salt-run", action='store_true')
+    parser.add_argument("--no-finalize", action='store_true')
+    parser.add_argument("--no-hostkeys", action='store_true')
+    parser.add_argument("--no-ensure-state", action='store_true')
+    parser.add_argument("--regen-host-keys", action='store_true')
+    parser.add_argument("--salt-env", action='store', default=DEFAULT_SALT_ENV,
+                        metavar='ENV')
+    parser.add_argument("--host-key-dir", action='store',
+                        default=DEFAULT_HOST_KEY_DIR, metavar='DIR')
+    return parser.parse_args(sys.argv[1:])
 
 
 def execute_with_salt(salt_client, target, command, func='cmd'):
     logger.debug("cmd: " + " ".join(command))
     result = getattr(salt_client, func)(
-        tgt=target,
-        fun='cmd.run_all',
-        arg=[" ".join(command)])
+        target,
+        'cmd.run_all',
+        [" ".join(command)])
     result = result[target]
     if result['retcode'] != 0:
         raise RemoteCmdError(retcode=result['retcode'], stderr=result['stderr'])
@@ -151,10 +118,10 @@ def _suppress_output(func, *args, **kwargs):
     return ret
 
 
-def get_pillar(salt_client, nodename):
-    pillar = salt_client.runner(
-        fun='pillar.show_pillar',
-        kwarg={'minion': nodename})
+def get_pillar(nodename):
+    opts = salt.config.master_config('/etc/salt/master')
+    runner = salt.runner.RunnerClient(opts)
+    pillar = _suppress_output(runner.cmd, 'pillar.show_pillar', [nodename])
     return pillar
 
 
@@ -243,6 +210,104 @@ def setup_cobbler(salt_client, cobbler_server, nodename, pillar,
         raise
 
 
+def libvirt_get_domains(salt_client, hypervisor, only_active=False):
+    args_virt_domains = ['virsh', 'list', '--name']
+    if only_active:
+        args_virt_domains.append('--state-running')
+    else:
+        args_virt_domains.append('--all')
+
+    try:
+        result = execute_with_salt(salt_client,
+                                   target=hypervisor,
+                                   command=args_virt_domains)
+    except RemoteCmdError:
+        raise
+    return [domain.strip() for domain in result['stdout'].splitlines()]
+
+
+def libvirt_start_domain(salt_client, hypervisor, domain):
+    args_virt_start_domain = ['virsh', 'start', domain]
+    try:
+        execute_with_salt(salt_client,
+                          target=hypervisor,
+                          command=args_virt_start_domain)
+    except RemoteCmdError:
+        raise
+
+
+def start_installation(salt_client, nodename, pillar, primary_interface):
+    mem = pillar['machine']['memory']
+    if mem < INSTALLATION_MEMORY:
+        logger.debug("Increasing memory from {mem}MiB to {new_mem}MiB for "
+                     "installation, reducing later.".format(
+                         mem=mem, new_mem=INSTALLATION_MEMORY))
+        mem = INSTALLATION_MEMORY
+
+    args_virt_install = [
+        'virt-install',
+        '--connect', 'qemu:///system',
+        '--name', nodename,
+        '--memory', str(mem),
+        '--vcpus', str(pillar['machine']['vcpus']),
+        '--cpu', 'none', # uses hypervisor default
+        '--pxe',
+        '--arch', 'x86_64',
+        '--sound', 'none',
+        '--os-variant', pillar['machine']['os'],
+        '--disk', 'pool=centos,size={size},bus=virtio,discard=unmap'.format(
+            size=pillar['machine']['disk']['size']),
+        '--network', 'network={network},model=virtio,mac={mac}'.format(
+            network=pillar['machine']['network'],
+            mac=primary_interface['mac']),
+        '--graphics', 'spice',
+        '--wait', '-1', # wait an hour, a negative value would mean wait forever
+        '--noreboot',
+        '--noautoconsole']
+
+    logger.debug("cmd: " + " ".join(args_virt_install))
+    jid = salt_client.cmd_async(pillar['machine']['hypervisor'],
+                                'cmd.run_all',
+                                [" ".join(args_virt_install)])
+    logger.debug("Started jid {}.".format(jid))
+    return jid
+
+
+def adjust_memory(salt_client, nodename, pillar):
+    mem = pillar['machine']['memory']
+    if mem < INSTALLATION_MEMORY:
+        logger.debug("Adjusting memory to {mem}MiB".format(mem=mem))
+        args_virt_adjust_mem = [
+            'virsh',
+            '--connect', 'qemu:///system',
+            'setmaxmem',
+            nodename, str(mem) + 'M',
+            '--config']
+        try:
+            execute_with_salt(salt_client,
+                              target=pillar['machine']['hypervisor'],
+                              command=args_virt_adjust_mem)
+        except RemoteCmdError:
+            raise
+    else:
+        logger.debug("No memory adjustment necessary.")
+
+
+def wait_for_installation_to_finish(salt_client, jid, pillar):
+    logger.debug("Waiting for jid {} ...".format(jid))
+    target = pillar['machine']['hypervisor']
+    results = salt_client.get_cli_returns(
+        jid, [pillar['machine']['hypervisor']], timeout=INSTALLATION_TIMEOUT)
+    for result in results:
+        if target in result.keys():
+            result = result[target]['ret']
+            if result['retcode'] != 0:
+                logger.critical("Installation failed: " + result['stderr'])
+                sys.exit(1)
+            else:
+                return
+
+
 def generate_ssh_key():
     key = paramiko.rsakey.RSAKey.generate(bits=4096)
     return key
@@ -251,15 +316,10 @@ def generate_ssh_key():
 def ssh_connect_to_new_host(nodename, ssh_key):
     client = paramiko.client.SSHClient()
     client.set_missing_host_key_policy(IgnoreMissingKeyPolicy())
-    user='root'
-    port=22
-    logger.debug("Connect to \"{nodename}\" as \"{user}\" on port {port}.".
-                 format(
-                     nodename=nodename, user=user, port=port))
     try:
         client.connect(nodename,
-                       port=port,
-                       username=user,
+                       port=22,
+                       username='root',
                        timeout=SSH_TIMEOUT,
                        pkey=ssh_key,
                        allow_agent=False,
@@ -268,8 +328,6 @@ def ssh_connect_to_new_host(nodename, ssh_key):
         raise
     except socket.timeout:
         raise
-    except socket.error:
-        return None
     return client
 
 
@@ -292,54 +350,16 @@ def read_ssh_key(directory, name='id_rsa'):
     return ssh_key
 
 
-def generate_host_keys(salt_client, nodename, directory, saltenv):
+def generate_host_keys(nodename, directory):
     key = generate_ssh_key()
-    def _write(name, key):
-        path = os.path.join(directory, nodename, name)
-        logger.debug("Path: {}".format(path))
-        result = salt_client.wheel(
-            fun='file_roots.write',
-            kwarg={
-                'saltenv': saltenv,
-                'path': path,
-                'data': key
-            })
-        return result
-
-    logger.debug("Writing public key.")
-    result_pub = _write(
-        'ssh_host_rsa_key.pub',
-        '{name} {key} {comment}'.format(
-            name=key.get_name(),
-            key=key.get_base64(),
-            comment=nodename))
-
-    # paramiko has no way to just give us the raw private key data
-    vfile = StringIO.StringIO()
-    key.write_private_key(vfile)
-    data = vfile.getvalue()
-    vfile.close()
-    logger.debug("Writing private key.")
-    result_priv = _write('ssh_host_rsa_key', data)
-
-    return result_pub['data']['success'] and result_priv['data']['success']
+    target = os.path.join(directory, nodename)
+    save_ssh_key(key, target, name='ssh_host_rsa_key')
 
 
-def host_keys_exist(salt_client, nodename, directory, saltenv):
-    logger.debug("Looking for host keys in \"{}\", saltenv \"{}\".".
-                 format(directory, saltenv))
-    result = salt_client.wheel(
-        fun='file_roots.find',
-        kwarg={
-            'saltenv': saltenv,
-            'path': os.path.join(directory, nodename, 'ssh_host_rsa_key')
-        })
-    exist = result['data']['return'] != []
-    if exist:
-        logger.debug("Found keys.")
-    else:
-        logger.debug("No keys found.")
-    return exist
+def host_keys_exist(nodename, directory):
+    target = os.path.join(directory, nodename)
+    logger.debug("Looking for host keys in \"{}\".".format(target))
+    return (read_ssh_key(target, name='ssh_host_rsa_key') is not None)
 
 
 def save_ssh_key(ssh_key, directory, name='id_rsa'):
@@ -364,30 +384,32 @@ def load_salt_keys(nodename, directory):
     return({'pub': key_pub, 'pem': key_pem})
 
 
-def generate_salt_keys(salt_client, nodename, directory):
-    result = salt_client.wheel(
-        fun='key.gen_accept',
-        kwarg={
-            'id_': nodename,
-            'force': True,
-            'keysize': SALT_KEYSIZE
-        })
+def master_accept_minion_keys(nodename, keys):
+    master_opts = salt.config.client_config('/etc/salt/master')
+    minion_keys = os.path.join(master_opts['pki_dir'], 'minions')
+    minion_key_path = os.path.join(minion_keys, nodename)
 
-    if not result['data']['success']:
-        logger.critical("Salt key generation failed.")
+    shutil.copyfile(keys['pub'], minion_key_path)
+
+
+def generate_salt_keys(nodename, directory):
+    master_opts = salt.config.client_config('/etc/salt/master')
+    minion_keys = os.path.join(master_opts['pki_dir'], 'minions')
+    minion_key_path = os.path.join(minion_keys, nodename)
+
+    if os.path.exists(minion_key_path):
+        logger.error("Salt already has an accepted key for that host.")
         sys.exit(1)
 
-    pub  = result['data']['return']['pub']
-    priv = result['data']['return']['priv']
+    args = ["salt-key",
+            "--gen-keys", nodename,
+            "--gen-keys-dir", directory]
+    process = subprocess.Popen(
+        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process.wait()
 
     key_pub = os.path.join(directory, '{}.pub'.format(nodename))
     key_pem = os.path.join(directory, '{}.pem'.format(nodename))
-
-    with open(key_pub, 'w') as file:
-        file.write(pub)
-
-    with open(key_pem, 'w') as file:
-        file.write(priv)
 
     return({'pub': key_pub, 'pem': key_pem})
 
@@ -452,21 +474,14 @@ def start_update_environment(nodename, salt_client, pillar):
         kwarg={'queue': True},
         expr_form='list')
     logger.debug("Started jid {}.".format(jid))
-    return jid
+    return (jid, servers)
 
 
-def wait_for_environment_update(salt_client, jid):
+def wait_for_environment_update(salt_client, jid, servers):
     logger.debug("Waiting for jid {} ...".format(jid))
-    results = salt_client.get_cli_returns(jid)
-    fail = False
-    for minion, result in results['data'].items():
-        for state, output in result.items():
-            if not output['result']:
-                logger.critical("State \"{0}\" on minion \"{1}\" failed.".
-                    format(output['name'], minion))
-                fail = True
-    if fail:
-        sys.exit(1)
+    result = salt_client.get_cli_returns(jid, servers)
+    for _ in result:
+        pass
 
 
 def wait_for_ping(target, timeout, spacing):
@@ -506,11 +521,7 @@ def salt_trigger_highstate(salt_client, nodename):
         tgt=nodename,
         fun='state.highstate',
         timeout=5*60)
-    try:
-        result = result[nodename]
-    except (KeyError, ValueError, TypeError):
-        logger.critical("Highstate failed: " + str(result))
-        sys.exit(1)
+    result = result[nodename]
     failed_states = list()
     all_ok = True
     for state in result.values():
@@ -520,8 +531,8 @@ def salt_trigger_highstate(salt_client, nodename):
     return (all_ok, failed_states)
 
 
-def main(argv):
-    args = parse_args(argv)
+def main():
+    args = parse_args()
     nodename = args.nodename
     if args.debug:
         console_level = logging.DEBUG
@@ -530,26 +541,15 @@ def main(argv):
 
     setup_logger(console_level)
 
-    salt_client = bootstrapper.salt.RemoteClient(
-        url=args.salt_url,
-        user=args.salt_user,
-        password=args.salt_password)
-    if not salt_client.connect():
-        logger.critical("Salt connection failed.")
-        sys.exit(1)
-
-    pillar = get_pillar(salt_client, nodename)
-
-    if not pillar:
+    pillar = get_pillar(nodename)
+    if len(pillar) == 0:
         logger.critical("No pillar data found for node \"{}\".".format(nodename))
         sys.exit(1)
 
     primary_interface = get_primary_interface(pillar)
 
     ssh_key = None
-
-    tempdir = os.path.join(tempfile.gettempdir(), 'bootstrap')
-    temp_keydir = os.path.join(tempdir, nodename)
+    temp_keydir = '/root/{}.d'.format(nodename)
     if not args.no_ssh:
         if not args.no_install:
             logger.info("Generating ephemeral SSH key ...")
@@ -565,7 +565,9 @@ def main(argv):
                     temp_keydir))
                 sys.exit(1)
 
-    if not (args.no_cobbler or args.no_install):
+    salt_client = salt.client.LocalClient()
+
+    if not args.no_cobbler:
         cobbler_server = get_cobbler_server(pillar, primary_interface)
         try:
             cobbler_systems = cobbler_get_systems(salt_client, cobbler_server)
@@ -587,86 +589,58 @@ def main(argv):
 
     if not args.no_prepare_env:
         logger.info("Preparing environment for new node ...")
-        env_jid = start_update_environment(
+        (env_jid, servers) = start_update_environment(
             nodename, salt_client, pillar)
 
-    connection = None
     if not args.no_install:
-        connection = bootstrapper.creators.libvirt.LibvirtConnection(
-            uri='qemu+ssh://root@{hypervisor}/system?keyfile={keyfile}'.format(
-                hypervisor=pillar['machine']['hypervisor'],
-                keyfile=args.hypervisor_keyfile))
-        creator = bootstrapper.creators.libvirt.LibvirtCreator(
-            connection=connection)
-        creator.connect()
-
-        if creator.domain_exists(nodename):
-            logger.error("The domain already exists on the hypervisor.")
+        try:
+            libvirt_domains = libvirt_get_domains(
+                salt_client, pillar['machine']['hypervisor'])
+        except RemoteCmdError as e:
+            logger.critical("Could not get domains: " + e.stderr)
             sys.exit(1)
 
-        logger.info("Creating new virtual machine ...")
-        mem = pillar['machine']['memory']
-        if mem < INSTALLATION_MEMORY:
-            logger.debug("Increasing memory from {mem}MiB to {new_mem}MiB for "
-                        "installation, reducing later.".format(
-                            mem=mem, new_mem=INSTALLATION_MEMORY))
-            mem = INSTALLATION_MEMORY
-
-        creator.create(params={
-            'name': nodename,
-            'memory': mem*1024,
-            'vcpus': pillar['machine']['vcpus'],
-            'arch': 'x86_64',
-            'interfaces': [
-                {
-                    'mac': primary_interface['mac'],
-                    'network': pillar['machine']['network']
-                }
-            ],
-            'disks': [
-                {
-                    'pool': 'centos',
-                    'name': nodename,
-                    'size': pillar['machine']['disk']['size']
-                }
-            ]})
+        if nodename in libvirt_domains:
+            logger.error("The domain already exists on the hypervisor. Use "
+                         "--reinstall to recreate the domain.")
+            sys.exit(1)
 
         logger.info("Starting installation ...")
-        creator.start(nodename)
+        install_jid = start_installation(salt_client, nodename, pillar,
+                                         primary_interface)
+
         logger.info("Waiting for installation to finish ...")
-        i = 0
-        ok = False
-        while i < INSTALLATION_TIMEOUT:
-            i += 1
-            if not creator.running(nodename):
-                ok = True
-                break
-            time.sleep(1)
-        if not ok:
-            logger.critical("Installation timed out.")
+        wait_for_installation_to_finish(salt_client, install_jid, pillar)
 
         logger.info("Adjusting memory ...")
-        creator.set_memory(nodename, pillar['machine']['memory']*1024)
+        try:
+            adjust_memory(salt_client, nodename, pillar)
+        except RemoteCmdError as e:
+            logger.critical("Could not adjust memory: " + e.stderr)
+            sys.exit(1)
 
-        logger.info("Disabling network boot ...")
-        creator.disable_pxe_boot(nodename)
-
-    if not args.no_prepare_env:
-        logger.info("Waiting for environment preparation to finish ...")
-        wait_for_environment_update(salt_client, env_jid)
+        if not args.no_prepare_env:
+            logger.info("Waiting for environment preparation to finish ...")
+            wait_for_environment_update(salt_client, env_jid, servers)
 
     if not args.no_ensure_state:
-        if connection is None:
-            connection = bootstrapper.creators.libvirt.LibvirtConnection(
-                    uri='qemu+ssh://root@10.1.1.156/system?keyfile=/home/hannes/.ssh/virt_rsa')
-            creator = bootstrapper.creators.libvirt.LibvirtCreator(
-                    connection=connection)
-            creator.connect()
-        if creator.running(nodename):
+        try:
+            libvirt_active_domains = libvirt_get_domains(
+                salt_client, pillar['machine']['hypervisor'], only_active=True)
+        except RemoteCmdError as e:
+            logger.critical("Could not get domains: " + e.stderr)
+            sys.exit(1)
+        if nodename in libvirt_active_domains:
             logger.info("No need to start domain, already active.")
         else:
-            logger.info("Starting domain ...")
-            creator.start(nodename)
+            logger.info("Starting node ...")
+            try:
+                libvirt_start_domain(salt_client,
+                                     pillar['machine']['hypervisor'],
+                                     nodename)
+            except RemoteCmdError as e:
+                logger.critical("Could not start node: " + e.stderr)
+                sys.exit(1)
 
             logger.info("Waiting for node startup ...")
             if not wait_for_ping(target=nodename, timeout=STARTUP_TIMEOUT,
@@ -679,24 +653,18 @@ def main(argv):
 
     if not args.no_ssh:
         logger.info("Trying to connect via SSH ...")
-        tries = 0
-        connection = None
-        while connection is None and tries <= 3:
-            try:
-                connection = ssh_connect_to_new_host(nodename, ssh_key)
-            except paramiko.SSHException as e:
-                logger.critical("SSH connection failed: {}".format(e.message))
-                sys.exit(1)
-            except socket.timeout:
-                logger.critical("SSH connection timed out.")
-                sys.exit(1)
-            tries += 1
-
+        try:
+            connection = ssh_connect_to_new_host(nodename, ssh_key)
+        except paramiko.SSHException as e:
+            logger.critical("SSH connection failed: {}".format(e.message))
+            sys.exit(1)
+        except socket.timeout:
+            logger.critical("SSH connection timed out.")
+            sys.exit(1)
 
         if not args.no_salt_keygen:
             logger.info("Generating new salt keys ...")
-            keys = generate_salt_keys(
-                salt_client, nodename, directory=temp_keydir)
+            keys = generate_salt_keys(nodename, directory=temp_keydir)
         else:
             logger.info("Loading salt keys from disk ...")
             keys = load_salt_keys(nodename, directory=temp_keydir)
@@ -704,6 +672,8 @@ def main(argv):
                 logger.critical("Salt keys not found in \"{}\"".format(
                     temp_keydir))
                 sys.exit(1)
+
+        master_accept_minion_keys(nodename, keys)
 
         logger.info("Copying salt keys to minion ...")
         copy_salt_keys_to_minion(connection, keys)
@@ -716,18 +686,16 @@ def main(argv):
         start_minion(connection)
 
 
-    host_key_dir = args.host_key_dir
-    logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
-    if args.regen_host_keys or not host_keys_exist(salt_client, nodename,
-                                                   host_key_dir,
-                                                   args.salt_env):
-        logger.info("Generating SSH host keys ...")
-        if not generate_host_keys(salt_client, nodename, host_key_dir,
-                                  args.salt_env):
-            logger.critical("Host key generation failed.")
-            sys.exit(1)
-    else:
-        logger.info("SSH host keys already exist, not regenerating.")
+    if not args.no_hostkeys:
+        host_key_dir = args.host_key_dir.format(environment=args.salt_env)
+        logger.debug("SSH host key directory: \"{}\".".format(host_key_dir))
+        if ((not host_keys_exist(nodename, host_key_dir)) or
+                args.regen_host_keys):
+            logger.info("Generating SSH host keys ...")
+            generate_host_keys(nodename, host_key_dir)
+        else:
+            logger.info("SSH host keys already exist, not regenerating.")
+
 
     if not args.no_salt_run:
         # give salt some time to connect
@@ -769,3 +737,7 @@ def main(argv):
         connection.close()
 
     logger.info("Finished successfully!")
+
+
+if __name__ == '__main__':
+    main()

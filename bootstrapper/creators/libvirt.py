@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python2
+from __future__ import absolute_import
 
 import xml.etree.ElementTree
 
@@ -6,6 +7,7 @@ import libvirt
 import jinja2
 
 import bootstrapper.creators
+
 
 DOM_XML_TEMPLATE = """<domain type='kvm'>
   <name>{{ name }}</name>
@@ -65,7 +67,7 @@ VOL_XML_TEMPLATE = """<volume type='block'>
 
 class LibvirtCreator(bootstrapper.creators.Creator):
     def __init__(self, connection):
-        super(LibvirtCreator, self).__init__()
+        super(LibvirtCreator, self).__init__(connection)
         self._conparam = connection
         self._connection = None
 
