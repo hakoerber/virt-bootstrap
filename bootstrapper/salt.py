@@ -1,8 +1,9 @@
 #!/usr/bin/env python2
 
+import time
+
 import requests
 import yaml
-import time
 
 TIMEOUT = 180
 
@@ -39,11 +40,12 @@ class RemoteClient(object):
         self._url = url
         self._user = user
         self._password = password
+        self._token = None
 
 
     def connect(self):
         self._token = connect(self._url, self._user, self._password)
-        return (self._token is not None)
+        return self._token is not None
 
     def disconnect(self):
         headers = {
@@ -59,7 +61,7 @@ class RemoteClient(object):
             )
         except requests.exceptions.ReadTimeout:
             return None
-        return (request.status_code == requests.codes.ok)
+        return request.status_code == requests.codes.ok
 
     def _run_raw(self, data):
         headers = {
@@ -85,7 +87,7 @@ class RemoteClient(object):
         return response
 
     def _run(self, client, tgt, fun, arg=None, kwarg=None,
-             expr_form='glob', timeout=60):
+             expr_form='glob'):
         data = {
             'client': client,
             'tgt': tgt,
@@ -95,9 +97,9 @@ class RemoteClient(object):
             'expr_form': expr_form,
             'http_response': '5'
         }
-        return(self._run_raw(data))
+        return self._run_raw(data)
 
-    def runner(self, fun, arg=None, kwarg=None):
+    def runner(self, fun, kwarg):
         return(self._run_raw({
             'client': 'runner',
             'fun': fun,
@@ -112,13 +114,13 @@ class RemoteClient(object):
         if kwarg:
             data.update(kwarg)
 
-        return(self._run_raw(data))
+        return self._run_raw(data)
 
     def cmd(self, *args, **kwargs):
-        return(self._run(client='local', *args, **kwargs))
+        return self._run(client='local', *args, **kwargs)
 
     def cmd_async(self, *args, **kwargs):
-        return(self._run(client='local_async', *args, **kwargs)['jid'])
+        return self._run(client='local_async', *args, **kwargs)['jid']
 
     def get_cli_returns(self, jid, timeout=60):
         while timeout > 0:

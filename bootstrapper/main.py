@@ -7,7 +7,6 @@ import logging
 import os
 import os.path
 import subprocess
-import shutil
 import socket
 import tempfile
 import StringIO
@@ -104,8 +103,8 @@ def parse_args(argv):
 
     group = parser.add_argument_group('libvirt options')
     group.add_argument("--libvirt-keyfile", dest="hypervisor_keyfile",
-                        action='store', metavar='FILE',
-                        default=DEFAULT_SSH_HYPERVISOR_KEY)
+                       action='store', metavar='FILE',
+                       default=DEFAULT_SSH_HYPERVISOR_KEY)
 
     group = parser.add_argument_group('cobbler options')
     group.add_argument("--overwrite-cobbler", action='store_true')
@@ -194,7 +193,7 @@ def cobbler_get_systems(salt_client, cobbler_server):
 
 def get_cobbler_server(pillar, primary_interface):
     provisioning_server = pillar['network'][primary_interface['network']]\
-        ['applications']['provisioning']['server']['name']
+            ['applications']['provisioning']['server']['name']
     return provisioning_server
 
 
@@ -251,8 +250,8 @@ def generate_ssh_key():
 def ssh_connect_to_new_host(nodename, ssh_key):
     client = paramiko.client.SSHClient()
     client.set_missing_host_key_policy(IgnoreMissingKeyPolicy())
-    user='root'
-    port=22
+    user = 'root'
+    port = 22
     logger.debug("Connect to \"{nodename}\" as \"{user}\" on port {port}.".
                  format(
                      nodename=nodename, user=user, port=port))
@@ -377,17 +376,17 @@ def generate_salt_keys(salt_client, nodename, directory):
         logger.critical("Salt key generation failed.")
         sys.exit(1)
 
-    pub  = result['data']['return']['pub']
+    pub = result['data']['return']['pub']
     priv = result['data']['return']['priv']
 
     key_pub = os.path.join(directory, '{}.pub'.format(nodename))
     key_pem = os.path.join(directory, '{}.pem'.format(nodename))
 
-    with open(key_pub, 'w') as file:
-        file.write(pub)
+    with open(key_pub, 'w') as pubfile:
+        pubfile.write(pub)
 
-    with open(key_pem, 'w') as file:
-        file.write(priv)
+    with open(key_pem, 'w') as privfile:
+        privfile.write(priv)
 
     return({'pub': key_pub, 'pem': key_pem})
 
@@ -463,7 +462,7 @@ def wait_for_environment_update(salt_client, jid):
         for state, output in result.items():
             if not output['result']:
                 logger.critical("State \"{0}\" on minion \"{1}\" failed.".
-                    format(output['name'], minion))
+                                format(output['name'], minion))
                 fail = True
     if fail:
         sys.exit(1)
@@ -608,8 +607,8 @@ def main(argv):
         mem = pillar['machine']['memory']
         if mem < INSTALLATION_MEMORY:
             logger.debug("Increasing memory from {mem}MiB to {new_mem}MiB for "
-                        "installation, reducing later.".format(
-                            mem=mem, new_mem=INSTALLATION_MEMORY))
+                         "installation, reducing later.".format(
+                             mem=mem, new_mem=INSTALLATION_MEMORY))
             mem = INSTALLATION_MEMORY
 
         creator.create(params={
@@ -658,9 +657,10 @@ def main(argv):
     if not args.no_ensure_state:
         if connection is None:
             connection = bootstrapper.creators.libvirt.LibvirtConnection(
-                    uri='qemu+ssh://root@10.1.1.156/system?keyfile=/home/hannes/.ssh/virt_rsa')
+                uri='qemu+ssh://root@10.1.1.156/system'
+                    '?keyfile=/home/hannes/.ssh/virt_rsa')
             creator = bootstrapper.creators.libvirt.LibvirtCreator(
-                    connection=connection)
+                connection=connection)
             creator.connect()
         if creator.running(nodename):
             logger.info("No need to start domain, already active.")
