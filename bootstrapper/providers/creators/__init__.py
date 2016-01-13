@@ -1,40 +1,38 @@
 #!/usr/bin/env python2
 
-class Creator(object):
-    def __init__(self, connection):
-        pass
+import bootstrapper.providers
 
-    def connect(self):
-        pass
+
+class Creator(bootstrapper.providers.Provider):
+    def __init__(self, connection):
+        super(Creator, self).__init__(connection)
 
     def domain_exists(self, domain):
-        pass
+        raise NotImplementedError()
 
     def create(self, params):
-        pass
+        raise NotImplementedError()
 
     def disable_pxe_boot(self, domain):
-        pass
+        raise NotImplementedError()
 
     def running(self, domain):
-        pass
+        raise NotImplementedError()
 
     def start(self, name):
         pass
 
     def get_memory(self, name):
-        pass
+        raise NotImplementedError()
 
     def set_memory(self, name, memory):
-        pass
-
-    def disconnect(self):
-        pass
+        raise NotImplementedError()
 
 
 class Params(object):
     def __init__(self, memory):
         self.memory = memory
+
 
 class Connection(object):
     def __init__(self):

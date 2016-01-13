@@ -1,0 +1,32 @@
+saltauth: &saltconnection
+    url: https://salt:8000
+    user: saltuser
+    password: saltpassword
+
+installer:
+    provider: cobbler
+    overwrite: true
+    connection:
+        server: http://cobbler.example.com/cobbler_api
+        user: cobbleruser
+        password: cobblerpassword
+
+creator:
+    provider: libvirt
+    connection:
+        uri: qemu+ssh://root@hypervisor.example.com/system?keyfile=~/.ssh/id_rsa
+
+configurator:
+    provider: salt
+    connection: *saltconnection
+    environment: base
+    hostkey_dir: files/ssh/hostkeys
+
+database:
+    provider: salt
+    connection: *saltconnection
+    environment: base
+
+orchestrator:
+    provider: salt
+    connection: *saltconnection

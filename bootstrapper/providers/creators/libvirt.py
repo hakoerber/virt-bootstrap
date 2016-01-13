@@ -6,7 +6,8 @@ import xml.etree.ElementTree
 import libvirt
 import jinja2
 
-import bootstrapper.creators
+import bootstrapper.providers
+import bootstrapper.providers.creators
 
 
 DOM_XML_TEMPLATE = """<domain type='kvm'>
@@ -65,9 +66,10 @@ VOL_XML_TEMPLATE = """<volume type='block'>
   <capacity unit='GiB'>{{ size }}</capacity>
 </volume>"""
 
-class LibvirtCreator(bootstrapper.creators.Creator):
+
+class Creator(bootstrapper.providers.creators.Creator):
     def __init__(self, connection):
-        super(LibvirtCreator, self).__init__(connection)
+        super(Creator, self).__init__(connection)
         self._conparam = connection
         self._connection = None
 
@@ -84,8 +86,7 @@ class LibvirtCreator(bootstrapper.creators.Creator):
             try:
                 pool = self._connection.storagePoolLookupByName(poolname)
             except libvirt.libvirtError:
-                raise ValueError("Storage pool \"{}\" does no exist.".format(
-                    poolname))
+                raise
             if not pool.isActive() == 1:
                 pool.create()
 
@@ -127,9 +128,10 @@ class LibvirtCreator(bootstrapper.creators.Creator):
     def disconnect(self):
         if self._connection is not None:
             self._connection.close()
+            self._connection = None
 
 
-class LibvirtConnection(bootstrapper.creators.Connection):
+class Connection(bootstrapper.providers.creators.Connection):
     def __init__(self, uri):
-        super(LibvirtConnection, self).__init__()
+        super(Connection, self).__init__()
         self.uri = uri
