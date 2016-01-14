@@ -65,8 +65,6 @@ This component is supposed to configure the new node to the desired state
 
 ## Options
 
-### Generic options:
-
 | Option               | Description                                                                       |
 | -------------------- | --------------------------------------------------------------------------------- |
 | `--debug`            | show debugging output                                                             |
@@ -79,24 +77,5 @@ This component is supposed to configure the new node to the desired state
 | `--no-finalize`      | do not clean up ephemeral SSH keys after successful install                       |
 | `--regen-host-keys`  | regenerate SSH host keys                                                          |
 
-**Note**: Debug output might contain sensitive information, such as authentication passwords or private SSH keys.
-
-### Libvirt options:
-
-| Option               | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `--libvirt-keyfile`  | path to the SSH keyfile to use when connecting to the hypervisor                  |
-
-### Cobbler options:
-
-| Option               | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `--overwrite-cobbler`| when a node profile for cobbler already exist, overwrite it instead of failing    |
-
-### Salt options:
-
-| Option               | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `--salt-env`         | name of the salt environment to use, defaults to `base`                           |
-| `--host-key-dir`     | path to the directory that contains the host keys on the salt master, relative to |
-|                      | the file root, defaults to `files/ssh/hostkeys`                                   |
+**Note**: ``--debug`` output might contain sensitive information, such as
+authentication passwords or private SSH keys.
