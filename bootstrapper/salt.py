@@ -149,13 +149,14 @@ class RemoteClient(object):
     def get_cli_returns(self, jid, timeout=60):
         logger.debug("Waiting for jid {}.".format(jid))
         while timeout > 0:
+            logger.debug("Timeout: {} seconds.".format(timeout))
             result = self._check_result(jid)
             logger.debug("Received: {}".format(result))
             if result != {}:
                 logger.debug("Success.")
                 return result
             time.sleep(5)
-            timeout += 5
+            timeout -= 5
         return None
 
     def _check_result(self, jid):

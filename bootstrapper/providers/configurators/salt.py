@@ -146,18 +146,23 @@ class Configurator(bootstrapper.providers.configurators.Configurator):
             return False
 
     def configurate(self, nodename):
-        result = self._salt_client.cmd(
+        jid = self._salt_client.cmd_async(
             tgt=nodename,
-            fun='state.highstate',
-            timeout=5*60)
+            fun='state.highstate')
+        result = self._salt_client.get_cli_returns(jid, timeout=5*60)
         try:
-            result = result[nodename]
+            result = result['data'][nodename]
         except (KeyError, ValueError, TypeError):
+            logger.debug("Failed to parse result.")
             return False
+        all_ok = True
         for state in result.values():
             if not state['result']:
-                return False
-        return True
+                logger.debug("Failed state: \"{}\".".format(state.get('name', 'unknown')))
+                all_ok = False
+            else:
+                logger.debug("Successful state: \"{}\".".format(state.get('name', 'unknown')))
+        return all_ok
 
     def disconnect(self):
         if self._salt_client is not None:
