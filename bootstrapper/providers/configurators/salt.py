@@ -48,7 +48,7 @@ class Agent(object):
         time.sleep(1)
 
         logger.info("Starting salt minion ...")
-        ssh_connection.exec_command('systemctl restart salt-minion')
+        ssh_connection.exec_command('service salt-minion restart')
 
 
 class Configurator(bootstrapper.providers.configurators.Configurator):
