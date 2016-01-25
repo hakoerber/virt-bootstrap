@@ -496,8 +496,8 @@ def main(argv):
             logger.critical("Minion did not show up.")
             sys.exit(1)
 
-        logger.info("Configurating new node ...")
-        if not configurator.configurate(nodename):
+        logger.info("Configuring new node ...")
+        if not configurator.configure(nodename):
             logger.critical("Configuration failed.")
             sys.exit(1)
 

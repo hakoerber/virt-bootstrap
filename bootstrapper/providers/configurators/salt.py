@@ -145,7 +145,7 @@ class Configurator(bootstrapper.providers.configurators.Configurator):
         except KeyError:
             return False
 
-    def configurate(self, nodename):
+    def configure(self, nodename):
         jid = self._salt_client.cmd_async(
             tgt=nodename,
             fun='state.highstate')

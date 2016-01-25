@@ -10,6 +10,9 @@ class Configurator(bootstrapper.providers.Provider):
     def generate_keys(self, nodename, directory, keysize):
         raise NotImplementedError()
 
+    def configure(self, nodename):
+        raise NotImplementedError()
+
 
 class Connection(object):
     def __init__(self):
