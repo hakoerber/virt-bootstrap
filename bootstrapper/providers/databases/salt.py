@@ -2,7 +2,7 @@
 from __future__ import absolute_import
 
 import bootstrapper.providers.databases
-import bootstrapper.salt
+import bootstrapper.providers.common.salt
 
 
 class Database(bootstrapper.providers.databases.Database):
@@ -13,7 +13,7 @@ class Database(bootstrapper.providers.databases.Database):
         self._salt_client = None
 
     def connect(self):
-        self._salt_client = bootstrapper.salt.RemoteClient(
+        self._salt_client = bootstrapper.providers.common.salt.RemoteClient(
             url=self._conparam.url,
             user=self._conparam.user,
             password=self._conparam.password)

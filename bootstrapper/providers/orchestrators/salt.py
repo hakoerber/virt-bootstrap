@@ -3,7 +3,7 @@ from __future__ import absolute_import
 
 
 import bootstrapper.providers.orchestrators
-import bootstrapper.salt
+import bootstrapper.providers.common.salt
 
 
 class Orchestrator(bootstrapper.providers.orchestrators.Orchestrator):
@@ -14,7 +14,7 @@ class Orchestrator(bootstrapper.providers.orchestrators.Orchestrator):
         self._salt_client = None
 
     def connect(self):
-        self._salt_client = bootstrapper.salt.RemoteClient(
+        self._salt_client = bootstrapper.providers.common.salt.RemoteClient(
             url=self._conparam.url,
             user=self._conparam.user,
             password=self._conparam.password)

@@ -7,7 +7,7 @@ import logging
 import time
 
 import bootstrapper.providers.configurators
-import bootstrapper.salt
+import bootstrapper.providers.common.salt
 
 # Salt keysize in bits
 DEFAULT_KEYSIZE = 4096
@@ -59,7 +59,7 @@ class Configurator(bootstrapper.providers.configurators.Configurator):
         self._salt_client = None
 
     def connect(self):
-        self._salt_client = bootstrapper.salt.RemoteClient(
+        self._salt_client = bootstrapper.providers.common.salt.RemoteClient(
             url=self._conparam.url,
             user=self._conparam.user,
             password=self._conparam.password)
