@@ -95,21 +95,22 @@ class Configurator(bootstrapper.providers.configurators.Configurator):
 
     def has_hostkeys(self, nodename, **kwargs):
         result = self._salt_client.wheel(
-            fun='file_roots.find',
+            fun='pillar_roots.find',
             kwarg={
                 'saltenv': kwargs.get('environment', 'base'),
-                'path': os.path.join(kwargs['hostkey_dir'],
-                                     nodename,
-                                     'ssh_host_rsa_key')
+                'path': os.path.join(
+                    kwargs['hostkey_dir'].format(host=nodename),
+                    'ssh_host_rsa_key')
             })
         return result['data']['return'] != []
 
     def store_hostkeys(self, nodename, key, **kwargs):
         def _write(name, key):
-            path = os.path.join(kwargs['hostkey_dir'], nodename, name)
+            path = os.path.join(kwargs['hostkey_dir'].format(host=nodename),
+                                name)
             logger.debug("Path: {}".format(path))
             result = self._salt_client.wheel(
-                fun='file_roots.write',
+                fun='pillar_roots.write',
                 kwarg={
                     'saltenv': kwargs.get('environment', 'base'),
                     'path': path,

@@ -187,25 +187,21 @@ def load_providers(config):
 
 def get_primary_interface(pillar):
     interfaces = pillar.get('interfaces')
+    primary_interface = None
     if interfaces is None:
         logger.critical("No interfaces defined for node.")
         sys.exit(1)
     if len(interfaces) == 1:
-        primary_interface = interfaces
+        primary_interface = interfaces[0]
     else:
-        primary_interfaces = {k: v for k, v in interfaces.items()
-                              if v.get('primary', False)}
-        if len(primary_interfaces) != 1:
-            logger.critical(
-                "More than one interface is defined as primary: "
-                "{interfaces}".format(
-                    interfaces=[i['identifier'] for i in
-                                primary_interfaces.values()]))
-            sys.exit(1)
-        primary_interface = primary_interfaces
-    primary_interface[primary_interface.keys()[0]]['network'] = \
-        primary_interface.keys()[0]
-    return primary_interface.values()[0]
+        for interface in interfaces:
+            if interface['primary'] is True:
+                if primary_interface is not None:
+                    logger.critical("More than one interface is defined as "
+                                    "primary.")
+                    sys.exit(1)
+                primary_interface = interface
+    return primary_interface
 
 
 def setup_install_server(install_server, nodename, pillar, primary_interface,
@@ -311,16 +307,16 @@ def start_update_environment(nodename, orchestrator, pillar):
     # - DHCP servers
     servers = set()
 
-    for domain, dominfo in pillar['domain'].items():
-        nameservers = dominfo['applications']['dns']['zoneinfo']['nameservers']
+    for domain in pillar['domains']:
+        nameservers = domain['applications']['dns']['zoneinfo']['nameservers']
         for nameserver in nameservers:
-            fqdn = nameserver['name'] + '.' + domain
+            fqdn = nameserver['name'] + '.' + domain['name']
             servers.add(fqdn)
 
-    for network, netinfo in pillar['network'].items():
-        dhcpservers = netinfo['applications']['dhcp']['servers']
+    for network in pillar['networks']:
+        dhcpservers = network['applications']['dhcp']['servers']
         for dhcpserver in dhcpservers:
-            fqdn = dhcpserver['name'] + '.' + netinfo['domain']
+            fqdn = dhcpserver['name'] + '.' + network['domain']
             servers.add(fqdn)
 
     # filter ourselves out
