@@ -2,4 +2,5 @@
 *.egg-info
 /build
 /venv*
-/misc
+conf/**
+!conf/example.yml
