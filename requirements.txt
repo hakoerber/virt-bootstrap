@@ -19,7 +19,7 @@ MarkupSafe==0.23
 mccabe==0.3.1
 msgpack-python==0.4.6
 packaging==15.3
-paramiko==2.0.9
+paramiko==2.10.1
 pep8==1.6.2
 py-salt==1.0
 pycrypto==2.6.1
